@@ -83,6 +83,20 @@ export {
   type StubRun,
 } from "./http-server.js";
 
+// --- context KV helpers ---
+export {
+  resolveRunContextStore,
+  parseActorRoleSafe,
+  loadWorkerWrite,
+  matchContextPath,
+  listContextResponse,
+  getContextResponse,
+  putContextKey,
+  deleteContextKey,
+  contextHttpStatus,
+  type ResolvedRunContext,
+} from "./context-routes.js";
+
 // --- serve ---
 export {
   startDaemon,

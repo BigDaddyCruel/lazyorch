@@ -3,6 +3,7 @@
  * PR-02: types, IDs, JSON I/O, schema_version, DAG/issue helpers.
  * PR-03: dual FSM engine (run + task), exit predicate, simulator.
  * PR-05: planning engine (validators, consensus, fake ports, replan hooks).
+ * PR-14: shared run context KV (context.json + write ACL).
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
 
@@ -36,6 +37,25 @@ export {
 
 export { readJsonFile, writeJsonFile } from "./store/json-io.js";
 export { StateStore } from "./store/state-store.js";
+export {
+  CONTEXT_ACTOR_ROLES,
+  CONTEXT_KEY_MAX_LEN,
+  CONTEXT_VALUE_MAX_BYTES,
+  ContextKvError,
+  isContextActorRole,
+  assertValidContextKey,
+  assertValidContextValue,
+  canWriteContext,
+  assertCanWriteContext,
+  emptyRunContext,
+  contextSnapshot,
+  listContextKeys,
+  getContextValue,
+  setContextValue,
+  deleteContextValue,
+  type ContextActorRole,
+  type RunContext,
+} from "./store/context-kv.js";
 
 export {
   RunFsmError,

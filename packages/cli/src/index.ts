@@ -5,6 +5,7 @@
 import { parseArgs } from "node:util";
 import { runInit } from "./commands/init.js";
 import { runDoctor } from "./commands/doctor.js";
+import { runContext, type ContextSubcommand } from "./commands/context.js";
 
 export const PACKAGE_NAME = "@lazyorch/cli" as const;
 
@@ -19,6 +20,12 @@ export {
   type DoctorResult,
   type DoctorFinding,
 } from "./commands/doctor.js";
+export {
+  runContext,
+  type ContextOptions,
+  type ContextResult,
+  type ContextSubcommand,
+} from "./commands/context.js";
 
 const HELP = `lazyorch — AI agent orchestration CLI
 
@@ -28,6 +35,7 @@ Usage:
 Commands:
   init     Create .lazyorch/config.yml and project.json skeleton
   doctor   Validate config, slot packing, and adapter binaries
+  context  Shared run context KV (list|get|set|delete)
   help     Show this help
 
 init options:
@@ -39,7 +47,15 @@ doctor options:
   --repo <path>  Repository root (default: cwd)
   --ci           Treat as CI/headless (timeout_action default fail when unset)
   --no-ci        Force interactive semantics (overrides CI/GITHUB_ACTIONS env)
+
+context usage:
+  lazyorch context list --run <id> [--repo <path>]
+  lazyorch context get <key> --run <id> [--repo <path>]
+  lazyorch context set <key> <value> --run <id> [--repo <path>]
+  lazyorch context delete <key> --run <id> [--repo <path>]
 `;
+
+const CONTEXT_ACTIONS = new Set<string>(["list", "get", "set", "delete"]);
 
 async function main(argv: string[]): Promise<number> {
   let values: Record<string, unknown>;
@@ -51,6 +67,7 @@ async function main(argv: string[]): Promise<number> {
       options: {
         name: { type: "string" },
         repo: { type: "string" },
+        run: { type: "string" },
         force: { type: "boolean", default: false },
         ci: { type: "boolean", default: false },
         "no-ci": { type: "boolean", default: false },
@@ -104,6 +121,39 @@ async function main(argv: string[]): Promise<number> {
         doctorOpts.ci = true;
       }
       const result = await runDoctor(doctorOpts);
+      return result.exitCode;
+    }
+    case "context": {
+      const actionRaw = positionals[1];
+      if (!actionRaw || !CONTEXT_ACTIONS.has(actionRaw)) {
+        process.stderr.write(
+          `error: context requires list|get|set|delete\n\n${HELP}`,
+        );
+        return 2;
+      }
+      const action = actionRaw as ContextSubcommand;
+      const runId =
+        typeof values.run === "string" ? values.run : undefined;
+      if (!runId) {
+        process.stderr.write("error: --run <id> is required for context\n");
+        return 2;
+      }
+      const ctxOpts: Parameters<typeof runContext>[0] = {
+        action,
+        run: runId,
+      };
+      if (typeof values.repo === "string") ctxOpts.repo = values.repo;
+      // positionals: context <action> [key] [value...]
+      if (action === "get" || action === "delete") {
+        if (typeof positionals[2] === "string") ctxOpts.key = positionals[2];
+      } else if (action === "set") {
+        if (typeof positionals[2] === "string") ctxOpts.key = positionals[2];
+        if (positionals.length >= 4) {
+          // Join remaining args so unquoted multi-word values work.
+          ctxOpts.value = positionals.slice(3).join(" ");
+        }
+      }
+      const result = await runContext(ctxOpts);
       return result.exitCode;
     }
     default: {
