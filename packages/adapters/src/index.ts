@@ -1,7 +1,7 @@
 /**
  * @lazyorch/adapters — session runner (KD-40), shell adapter, budget hours,
  * adapter registry + discovery (PR-08), first-class coding adapters (PR-09),
- * capability deepening + user templates (PR-22).
+ * capability deepening + user templates (PR-22), secret scrubbing (PR-23).
  */
 export const PACKAGE_NAME = "@lazyorch/adapters" as const;
 

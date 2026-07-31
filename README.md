@@ -18,7 +18,9 @@ Full design document and key decisions:
 
 - [`docs/design-lazyorch.md`](docs/design-lazyorch.md)
 
-OpenAPI placeholder: [`docs/openapi.yaml`](docs/openapi.yaml)
+OpenAPI (daemon HTTP freeze): [`docs/openapi.yaml`](docs/openapi.yaml)
+
+Release / install notes (private beta, npm, Windows): [`docs/release.md`](docs/release.md)
 
 ## Monorepo layout
 

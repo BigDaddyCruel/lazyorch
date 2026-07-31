@@ -24,9 +24,13 @@ const SECRET_ENV_EXACT = new Set([
 const SECRET_ENV_RE =
   /^(LAZYORCH_.*|.*_(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY))$/i;
 
-/** Best-effort redaction of secret-looking tokens in free text. */
+/**
+ * Best-effort redaction of secret-looking tokens in free text (prompts, logs).
+ * Covers common GitHub PAT/OAuth prefixes, OpenAI/xAI keys, and AWS access key ids.
+ * Not a substitute for pre-integrate secret scan (KD-45).
+ */
 const SECRET_VALUE_RE =
-  /\b(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,})\b/g;
+  /\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b/g;
 
 /**
  * Vendor credentials allowed on coding-CLI child processes only.

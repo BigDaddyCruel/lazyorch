@@ -8,6 +8,10 @@
  * Outside-allowlist → approval_policy / gate is a scheduler concern (not here).
  * Optional strict deny patterns (e.g. for `node -e`) may be added in project
  * config; they are not defaults so tests and acceptance scripts keep working.
+ *
+ * Private-beta guidance: keep defaults; do not allowlist unrestricted shells
+ * (`bash`/`cmd`/`powershell`); tighten deny_patterns in config when needed.
+ * See docs/release.md and docs/user-guide.md (shell adapter allowlist).
  */
 
 import { basename } from "node:path";
