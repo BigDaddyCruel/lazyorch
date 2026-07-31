@@ -14,6 +14,8 @@ export {
   buildCodingArgv,
   expandFlagTemplate,
   resolveCodingBinary,
+  isUsableModelId,
+  CodingArgvError,
   type BuildCodingArgvOptions,
 } from "./argv.js";
 
@@ -37,6 +39,7 @@ export {
   StartRecorder,
   defaultFakeResult,
   resolveRunMode,
+  modeAllowsUnbound,
   type CodingRunMode,
   type RecordedStart,
   type FakeSessionResultFactory,

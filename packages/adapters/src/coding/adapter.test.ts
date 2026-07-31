@@ -10,9 +10,16 @@ import { createClaudeAdapter, claudeRegistration } from "../claude/index.js";
 import { createCodexAdapter, codexRegistration } from "../codex/index.js";
 import { createAgyAdapter, agyRegistration } from "../agy/index.js";
 import { createGrokAdapter, grokRegistration } from "../grok/index.js";
-import { buildCodingArgv, expandFlagTemplate } from "./argv.js";
-import { CODING_PROFILES, FIRST_CLASS_CODING_IDS } from "./profiles.js";
-import { CodingAdapterError } from "./adapter.js";
+import { BUILTIN_CATALOG } from "../registry/catalog.js";
+import {
+  buildCodingArgv,
+  CodingArgvError,
+  expandFlagTemplate,
+} from "./argv.js";
+import {
+  CODING_PROFILES,
+  FIRST_CLASS_CODING_IDS,
+} from "./profiles.js";
 import { StartRecorder } from "./fake.js";
 
 const tempDirs: string[] = [];
@@ -161,6 +168,38 @@ describe("expandFlagTemplate / buildCodingArgv", () => {
     ]);
   });
 
+  it("required model profiles throw on empty or n/a", () => {
+    const empty = llmSession("/tmp/s", { model: "", prompt_file: "/tmp/s/p.md" });
+    expect(() =>
+      buildCodingArgv({
+        profile: CODING_PROFILES.claude,
+        registration: claudeRegistration(),
+        session: empty,
+      }),
+    ).toThrow(CodingArgvError);
+
+    const na = llmSession("/tmp/s", { model: "n/a", prompt_file: "/tmp/s/p.md" });
+    expect(() =>
+      buildCodingArgv({
+        profile: CODING_PROFILES.codex,
+        registration: codexRegistration(),
+        session: na,
+      }),
+    ).toThrow(CodingArgvError);
+
+    try {
+      buildCodingArgv({
+        profile: CODING_PROFILES.grok,
+        registration: grokRegistration(),
+        session: na,
+      });
+      expect.fail("expected missing_model");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CodingArgvError);
+      expect((e as CodingArgvError).code).toBe("missing_model");
+    }
+  });
+
   it("honors custom start_template override", () => {
     const session = llmSession("/tmp/s", {
       model: "x",
@@ -175,6 +214,15 @@ describe("expandFlagTemplate / buildCodingArgv", () => {
       session,
     });
     expect(argv).toEqual(["/bin/claude", "--custom", "x", "/tmp/s/prompt.md"]);
+  });
+
+  it("catalog start_template matches profile default for all coding ids", () => {
+    for (const id of FIRST_CLASS_CODING_IDS) {
+      const cat = BUILTIN_CATALOG.find((e) => e.id === id);
+      expect(cat?.start_template).toBe(
+        CODING_PROFILES[id].default_start_template,
+      );
+    }
   });
 });
 
@@ -271,9 +319,20 @@ describe("CodingCliAdapter fake mode (all four)", () => {
       agyRegistration({ unbound: true, binary_path: undefined }),
       { mode: "live" },
     );
-    await expect(a.start(llmSession(dir, { adapter_id: "agy" }))).rejects.toBeInstanceOf(
-      CodingAdapterError,
+    await expect(
+      a.start(llmSession(dir, { adapter_id: "agy", model: "m" })),
+    ).rejects.toMatchObject({ code: "unbound" });
+  });
+
+  it("record mode refuses unbound (same gate as live)", async () => {
+    const dir = await tempDir();
+    const a = createGrokAdapter(
+      grokRegistration({ unbound: true }),
+      { mode: "record" },
     );
+    await expect(
+      a.start(llmSession(dir, { adapter_id: "grok", model: "grok-3" })),
+    ).rejects.toMatchObject({ code: "unbound" });
   });
 
   it("fake mode allows unbound", async () => {
@@ -286,6 +345,15 @@ describe("CodingCliAdapter fake mode (all four)", () => {
     const agent = await a.start(llmSession(dir, { adapter_id: "agy", model: "m" }));
     const result = await agent.wait();
     expect(result.status).toBe("ok");
+  });
+
+  it("missing model on required adapter surfaces missing_model", async () => {
+    const dir = await tempDir();
+    await writeFile(join(dir, "prompt.md"), "x\n", "utf8");
+    const a = createClaudeAdapter(claudeRegistration(), { mode: "fake" });
+    await expect(
+      a.start(llmSession(dir, { model: "n/a" })),
+    ).rejects.toMatchObject({ code: "missing_model" });
   });
 });
 
@@ -329,6 +397,45 @@ describe("CodingCliAdapter live with fake spawn + usage parse", () => {
     const result = await agent.wait();
     expect(result.status).toBe("ok");
     expect(result.usage).toEqual({ input_tokens: 42, output_tokens: 7 });
+  });
+
+  it("preserves vendor API keys in live spawn env", async () => {
+    const dir = await tempDir();
+    await writeFile(join(dir, "prompt.md"), "hi\n", "utf8");
+    let seenEnv: Record<string, string> | undefined;
+    const spawnImpl: SpawnImpl = async (req) => {
+      seenEnv = req.env;
+      return {
+        pid: 55,
+        wait: async () => ({ exit_code: 0, signal: null }),
+        kill: () => undefined,
+      };
+    };
+    const prevAnthropic = process.env.ANTHROPIC_API_KEY;
+    const prevGh = process.env.GH_TOKEN;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    process.env.GH_TOKEN = "ghp_should_not_pass";
+    try {
+      const adapter = createClaudeAdapter(
+        claudeRegistration({
+          env: { OPENAI_API_KEY: "sk-from-reg", MY_FLAG: "1" },
+        }),
+        { mode: "live", spawnImpl, skip_usage_parse: true },
+      );
+      const agent = await adapter.start(
+        llmSession(dir, { model: "claude-sonnet-4-6" }),
+      );
+      await agent.wait();
+      expect(seenEnv?.ANTHROPIC_API_KEY).toBe("sk-ant-test");
+      expect(seenEnv?.OPENAI_API_KEY).toBe("sk-from-reg");
+      expect(seenEnv?.MY_FLAG).toBe("1");
+      expect(seenEnv?.GH_TOKEN).toBeUndefined();
+    } finally {
+      if (prevAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevAnthropic;
+      if (prevGh === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = prevGh;
+    }
   });
 
   it("maps signal kill to cancelled", async () => {
@@ -391,8 +498,44 @@ describe("AdapterRegistry.createAdapter coding path", () => {
     expect(liveReg.createAdapter("claude")).toBeNull();
     expect(liveReg.createAdapter("agy")).toBeNull();
 
+    // record also nulls unbound
+    const recordReg = await AdapterRegistry.fromConfig(
+      AdaptersConfigSchema.parse({}),
+      {
+        platform: "linux",
+        env: { PATH: "/bin" },
+        exists: async () => false,
+        codingMode: "record",
+      },
+    );
+    expect(recordReg.createAdapter("agy")).toBeNull();
+
     // generic for user ids only
     expect(registry.createGeneric("claude")).toBeNull();
+  });
+
+  it("LAZYORCH_ADAPTER_MODE=fake creates unbound without codingMode option", async () => {
+    const prev = process.env.LAZYORCH_ADAPTER_MODE;
+    process.env.LAZYORCH_ADAPTER_MODE = "fake";
+    try {
+      const registry = await AdapterRegistry.fromConfig(
+        AdaptersConfigSchema.parse({}),
+        {
+          platform: "linux",
+          env: { PATH: "/bin" },
+          exists: async () => false,
+          // codingMode intentionally omitted — env drives mode
+        },
+      );
+      expect(registry.effectiveCodingMode()).toBe("fake");
+      const agy = registry.createCoding("agy");
+      expect(agy).not.toBeNull();
+      expect(agy!.runMode).toBe("fake");
+      expect(registry.get("agy")?.unbound).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.LAZYORCH_ADAPTER_MODE;
+      else process.env.LAZYORCH_ADAPTER_MODE = prev;
+    }
   });
 
   it("createGeneric still serves user registry adapters", async () => {

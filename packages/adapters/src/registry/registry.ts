@@ -6,6 +6,8 @@ import type { AdaptersConfig } from "@lazyorch/shared";
 import {
   createCodingAdapter,
   isFirstClassCodingId,
+  modeAllowsUnbound,
+  resolveRunMode,
   type CodingAdapterOptions,
   type CodingCliAdapter,
   type CodingRunMode,
@@ -134,13 +136,22 @@ export class AdapterRegistry {
   }
 
   /**
+   * Effective coding run mode: options.codingMode > LAZYORCH_ADAPTER_MODE > live.
+   * Used for both unbound gate and CodingCliAdapter construction.
+   */
+  effectiveCodingMode(): CodingRunMode {
+    return resolveRunMode(this.options.codingMode);
+  }
+
+  /**
    * Create a runtime AgentAdapter.
    * - shell → ShellAdapter (always; ignores registry overlays)
    * - first-class coding (claude/codex/agy/grok) → CodingCliAdapter
    * - others with start_template → GenericCliAdapter
-   * - unbound (live) / no template → null
+   * - unbound (live/record) / no template → null
    *
-   * Fake mode: first-class coding adapters may be created even when unbound.
+   * Fake mode (options or LAZYORCH_ADAPTER_MODE=fake): first-class coding
+   * adapters may be created even when unbound.
    */
   createAdapter(id: string): AgentAdapter | null {
     // Shell is hard-wired: never GenericCliAdapter, never null due to overlay.
@@ -160,17 +171,18 @@ export class AdapterRegistry {
     const reg = this.get(id);
     if (!reg || !reg.enabled) return null;
 
-    const codingMode = this.options.codingMode ?? "live";
-
     // First-class coding adapters (PR-09).
     if (isFirstClassCodingId(id)) {
-      if (reg.unbound && codingMode === "live") return null;
+      const codingMode = this.effectiveCodingMode();
+      // live + record require bound binary; fake allows unbound (CI).
+      if (reg.unbound && !modeAllowsUnbound(codingMode)) return null;
       const codingOpts: Omit<CodingAdapterOptions, "registration"> = {
         ...(this.options.coding ?? {}),
       };
       if (this.options.spawnImpl) codingOpts.spawnImpl = this.options.spawnImpl;
       if (this.options.execImpl) codingOpts.execImpl = this.options.execImpl;
-      if (this.options.codingMode) codingOpts.mode = this.options.codingMode;
+      // Always pass resolved mode so adapter matches unbound gate (incl. env).
+      codingOpts.mode = codingMode;
       if (this.options.codingRecorder) {
         codingOpts.recorder = this.options.codingRecorder;
       }

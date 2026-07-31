@@ -7,7 +7,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { scrubEnv } from "../scrub.js";
+import { scrubCodingSpawnEnv } from "../scrub.js";
 import type {
   AgentAdapter,
   AgentSession,
@@ -20,9 +20,10 @@ import { probeAdapter, type ExecImpl } from "../registry/probe.js";
 import type { AdapterRegistration } from "../registry/types.js";
 import type { SpawnImpl, SpawnedProcess } from "../shell/adapter.js";
 import { defaultSpawnImpl } from "../shell/adapter.js";
-import { buildCodingArgv } from "./argv.js";
+import { buildCodingArgv, CodingArgvError } from "./argv.js";
 import {
   defaultFakeResult,
+  modeAllowsUnbound,
   resolveRunMode,
   type CodingRunMode,
   type FakeSessionResultFactory,
@@ -43,6 +44,7 @@ export class CodingAdapterError extends Error {
     | "unknown_profile"
     | "spawn"
     | "empty_argv"
+    | "missing_model"
     | "not_llm";
 
   constructor(code: CodingAdapterError["code"], message: string) {
@@ -156,6 +158,7 @@ export class CodingCliAdapter implements AgentAdapter {
 
   /**
    * Build argv for session without starting (tests / dry-run).
+   * Wraps {@link CodingArgvError} as {@link CodingAdapterError}.
    */
   buildArgv(session: AgentSession): string[] {
     const opts: Parameters<typeof buildCodingArgv>[0] = {
@@ -166,7 +169,14 @@ export class CodingCliAdapter implements AgentAdapter {
     if (this.prefer_template !== undefined) {
       opts.prefer_template = this.prefer_template;
     }
-    return buildCodingArgv(opts);
+    try {
+      return buildCodingArgv(opts);
+    } catch (err) {
+      if (err instanceof CodingArgvError) {
+        throw new CodingAdapterError(err.code, err.message);
+      }
+      throw err;
+    }
   }
 
   async start(session: AgentSession): Promise<RunningAgent> {
@@ -176,7 +186,8 @@ export class CodingCliAdapter implements AgentAdapter {
         `coding adapter ${this.id} only accepts session_kind: llm (use shell for deterministic)`,
       );
     }
-    if (this.reg.unbound && this.mode === "live") {
+    // live + record require a bound binary; fake may run unbound (CI).
+    if (this.reg.unbound && !modeAllowsUnbound(this.mode)) {
       throw new CodingAdapterError(
         "unbound",
         `adapter ${this.id} is unbound — set binary path or install CLI on PATH`,
@@ -189,7 +200,13 @@ export class CodingCliAdapter implements AgentAdapter {
       );
     }
 
-    const argv = this.buildArgv(session);
+    let argv: string[];
+    try {
+      argv = this.buildArgv(session);
+    } catch (err) {
+      if (err instanceof CodingAdapterError) throw err;
+      throw err;
+    }
     if (argv.length === 0) {
       throw new CodingAdapterError(
         "empty_argv",
@@ -289,11 +306,12 @@ export class CodingCliAdapter implements AgentAdapter {
     argv: string[],
     recorded: RecordedStart,
   ): Promise<RunningAgent> {
-    const cleanEnv = scrubEnv({
-      ...process.env,
-      ...session.env,
-      ...(this.reg.env ?? {}),
-    });
+    // Preserve vendor API keys for live CLIs; still scrub orchestrator secrets.
+    const cleanEnv = scrubCodingSpawnEnv(
+      process.env,
+      session.env,
+      this.reg.env,
+    );
 
     let spawned: SpawnedProcess;
     try {

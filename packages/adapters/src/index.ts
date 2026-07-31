@@ -27,7 +27,14 @@ export type {
   SessionMeta,
 } from "./types.js";
 
-export { scrubEnv, scrubText, isSecretEnvKey } from "./scrub.js";
+export {
+  scrubEnv,
+  scrubText,
+  scrubCodingSpawnEnv,
+  isSecretEnvKey,
+  isCodingVendorEnvKey,
+  CODING_VENDOR_ENV_ALLOWLIST,
+} from "./scrub.js";
 export { killProcessTree, type KillTreeOptions } from "./process-tree.js";
 
 export {
@@ -155,6 +162,8 @@ export {
   buildCodingArgv,
   expandFlagTemplate,
   resolveCodingBinary,
+  isUsableModelId,
+  CodingArgvError,
   parseUsageFromText,
   parseUsageFromLog,
   usageFromJsonObject,
@@ -166,6 +175,7 @@ export {
   StartRecorder,
   defaultFakeResult,
   resolveRunMode,
+  modeAllowsUnbound,
   type CodingAdapterOptions,
   type BuildCodingArgvOptions,
   type CodingAdapterProfile,

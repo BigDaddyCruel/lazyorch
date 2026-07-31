@@ -1,15 +1,22 @@
 /**
  * Fake / record modes for coding adapters (CI without live LLMs).
  *
- * - live:   spawn real binary via SpawnImpl
- * - fake:   no real process; return canned SessionResult; still builds argv
- * - record: like live, but captures RecordedStart entries (and can pair with
- *           fake spawnImpl in tests to avoid network)
+ * - live:   spawn real binary via SpawnImpl; requires bound binary
+ * - fake:   no real process; return canned SessionResult; still builds argv;
+ *           unbound adapters allowed (CI without installed CLIs)
+ * - record: like live (real spawn path), but captures RecordedStart entries
+ *           (pair with inject spawnImpl in tests to avoid network). Requires
+ *           bound binary — same unbound gate as live.
  */
 
 import type { AgentSession, SessionResult } from "../types.js";
 
 export type CodingRunMode = "live" | "fake" | "record";
+
+/** True when mode may run without a resolved binary (fake only). */
+export function modeAllowsUnbound(mode: CodingRunMode): boolean {
+  return mode === "fake";
+}
 
 export interface RecordedStart {
   adapter_id: string;

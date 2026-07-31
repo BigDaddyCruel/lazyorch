@@ -11,6 +11,16 @@ import {
 } from "../registry/generic.js";
 import type { CodingAdapterProfile } from "./profiles.js";
 
+export class CodingArgvError extends Error {
+  readonly code: "missing_model";
+
+  constructor(code: CodingArgvError["code"], message: string) {
+    super(message);
+    this.name = "CodingArgvError";
+    this.code = code;
+  }
+}
+
 /**
  * Expand a simple template like `--model {model}` into argv tokens.
  * Values with spaces stay single tokens (placeholder-only expand).
@@ -37,9 +47,10 @@ export interface BuildCodingArgvOptions {
   registration: AdapterRegistration;
   session: AgentSession;
   /**
-   * When true (default), prefer programmatic profile argv.
-   * When registration.start_template differs from catalog default and
-   * `prefer_template` is true, use start_template instead (user override).
+   * When true, force the start_template path even if the template matches
+   * the profile default. Default is false (use programmatic profile argv).
+   * Custom templates (≠ profile.default_start_template) always use the
+   * template path regardless of this flag.
    */
   prefer_template?: boolean;
 }
@@ -51,6 +62,12 @@ export function resolveCodingBinary(reg: AdapterRegistration): string {
   return reg.binary_path ?? reg.binary;
 }
 
+/** True when model is usable for a required model flag. */
+export function isUsableModelId(model: string): boolean {
+  const m = model.trim();
+  return m.length > 0 && m !== "n/a";
+}
+
 /**
  * Build full argv for a coding adapter start.
  *
@@ -59,6 +76,9 @@ export function resolveCodingBinary(reg: AdapterRegistration): string {
  *
  * If registration has a custom start_template (≠ profile default), use
  * template path so user overrides stay authoritative.
+ *
+ * Throws {@link CodingArgvError} (`missing_model`) when the profile requires
+ * a model flag and session.model is empty or `"n/a"`.
  */
 export function buildCodingArgv(options: BuildCodingArgvOptions): string[] {
   const { profile, registration, session } = options;
@@ -68,6 +88,16 @@ export function buildCodingArgv(options: BuildCodingArgvOptions): string[] {
     (session.session_dir
       ? join(session.session_dir, "prompt.md")
       : "prompt.md");
+
+  const model = session.model?.trim() ?? "";
+
+  // Required model flag: refuse empty / "n/a" (best-effort agy may omit).
+  if (profile.model_flag_required && !isUsableModelId(model)) {
+    throw new CodingArgvError(
+      "missing_model",
+      `adapter ${profile.id} requires a model id (got ${JSON.stringify(session.model ?? "")})`,
+    );
+  }
 
   const customTemplate =
     registration.start_template &&
@@ -111,13 +141,10 @@ export function buildCodingArgv(options: BuildCodingArgvOptions): string[] {
     argv.push(a);
   }
 
-  const model = session.model?.trim() ?? "";
-  // Required: always pass when model non-empty.
+  // Required: always include (validated above).
   // Best-effort (agy): skip empty / "n/a".
   const includeModel =
-    profile.model_flag_template.length > 0 &&
-    model.length > 0 &&
-    (profile.model_flag_required || model !== "n/a");
+    profile.model_flag_template.length > 0 && isUsableModelId(model);
 
   if (includeModel) {
     const modelArgs = expandFlagTemplate(profile.model_flag_template, {
