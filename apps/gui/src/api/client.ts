@@ -23,8 +23,30 @@ export class DaemonApiError extends Error {
   }
 }
 
+/** True when the error is an HTTP 401 / unauthorized daemon response. */
+export function isUnauthorizedError(err: unknown): boolean {
+  if (!(err instanceof DaemonApiError)) return false;
+  if (err.status === 401) return true;
+  if (
+    typeof err.body === "object" &&
+    err.body !== null &&
+    "error" in err.body &&
+    (err.body as { error: unknown }).error === "unauthorized"
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function normalizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && err.name === "AbortError")
+  );
 }
 
 /**
@@ -49,9 +71,7 @@ export class DaemonClient {
     const cfg: DaemonClientConfig = {
       baseUrl: partial.baseUrl ?? this.baseUrl,
       useDemoFallback:
-        partial.useDemoFallback !== undefined
-          ? partial.useDemoFallback
-          : this.useDemoFallback,
+        partial.useDemoFallback !== undefined ? partial.useDemoFallback : this.useDemoFallback,
       fetchImpl: partial.fetchImpl ?? this.fetchImpl,
     };
     if (nextToken !== undefined) cfg.token = nextToken;
@@ -93,43 +113,50 @@ export class DaemonClient {
     return body as T;
   }
 
-  getHealth(): Promise<HealthResponse> {
-    return this.requestJson<HealthResponse>("/health");
+  getHealth(init?: RequestInit): Promise<HealthResponse> {
+    return this.requestJson<HealthResponse>("/health", init);
   }
 
-  getStatus(): Promise<StatusResponse> {
-    return this.requestJson<StatusResponse>("/v1/status");
+  getStatus(init?: RequestInit): Promise<StatusResponse> {
+    return this.requestJson<StatusResponse>("/v1/status", init);
   }
 
-  listProjects(): Promise<{ projects: RegisteredProject[] }> {
-    return this.requestJson<{ projects: RegisteredProject[] }>("/v1/projects");
+  listProjects(init?: RequestInit): Promise<{ projects: RegisteredProject[] }> {
+    return this.requestJson<{ projects: RegisteredProject[] }>("/v1/projects", init);
   }
 
-  listRuns(projectId?: string): Promise<{ runs: DaemonRun[] }> {
+  listRuns(projectId?: string, init?: RequestInit): Promise<{ runs: DaemonRun[] }> {
     const q = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-    return this.requestJson<{ runs: DaemonRun[] }>(`/v1/runs${q}`);
+    return this.requestJson<{ runs: DaemonRun[] }>(`/v1/runs${q}`, init);
   }
 
-  listAdapters(): Promise<AdaptersResponse> {
-    return this.requestJson<AdaptersResponse>("/v1/adapters");
+  listAdapters(init?: RequestInit): Promise<AdaptersResponse> {
+    return this.requestJson<AdaptersResponse>("/v1/adapters", init);
   }
 
-  routeModel(role = "worker", task?: string): Promise<ModelRouteResponse> {
+  routeModel(role = "worker", task?: string, init?: RequestInit): Promise<ModelRouteResponse> {
     const params = new URLSearchParams({ role });
     if (task) params.set("task", task);
-    return this.requestJson<ModelRouteResponse>(`/v1/models/route?${params}`);
+    return this.requestJson<ModelRouteResponse>(`/v1/models/route?${params}`, init);
   }
 
   /**
    * Build board runs: live stub list from daemon, enriched with demo detail
    * when the daemon has no rich payload yet (MVP).
+   *
+   * Demo is used only for **empty** successful lists (when enabled) or optional
+   * transport-offline handling by the caller. **Auth failures (401) always
+   * rethrow** — never mask with fixtures.
    */
-  async getBoardRuns(projectId?: string): Promise<{
+  async getBoardRuns(
+    projectId?: string,
+    init?: RequestInit,
+  ): Promise<{
     runs: BoardRun[];
     source: "daemon" | "demo" | "mixed";
   }> {
     try {
-      const { runs } = await this.listRuns(projectId);
+      const { runs } = await this.listRuns(projectId, init);
       if (runs.length === 0 && this.useDemoFallback) {
         return { runs: createDemoRuns(), source: "demo" };
       }
@@ -152,12 +179,22 @@ export class DaemonClient {
       });
       const mixed = board.some((b) => (b.tasks?.length ?? 0) > 0 && demoById.has(b.id));
       return { runs: board, source: mixed ? "mixed" : "daemon" };
-    } catch {
-      if (this.useDemoFallback) {
-        return { runs: createDemoRuns(), source: "demo" };
+    } catch (err) {
+      // Never hide auth failures behind demo data
+      if (isUnauthorizedError(err)) {
+        throw err;
       }
-      throw new Error("Failed to load runs from daemon");
+      if (err instanceof DaemonApiError) {
+        throw err;
+      }
+      // Transport / unexpected: let caller decide demo vs surface error
+      throw err;
     }
+  }
+
+  /** Local demo fixtures (no network). Callers use when offline + demo enabled. */
+  getDemoBoardRuns(): { runs: BoardRun[]; source: "demo" } {
+    return { runs: createDemoRuns(), source: "demo" };
   }
 
   /** Best-effort event snapshot (SSE live stream is separate). */
@@ -166,49 +203,82 @@ export class DaemonClient {
   }
 
   /**
-   * Open SSE to /v1/events. Returns an abort handle.
-   * Browser EventSource cannot set Authorization; when a token is required
-   * we fall back to fetch streaming (or skip). For loopback without Origin
-   * auth this works; with Origin (browser), Bearer is required — use
-   * fetch-based stream when token present.
+   * Open SSE to /v1/events with automatic reconnect + exponential backoff.
+   * Clean EOF and non-abort errors schedule a retry while not closed.
    */
   subscribeEvents(options: {
     projectId?: string;
     onEvent: (event: EventEnvelope) => void;
     onError?: (err: unknown) => void;
     onOpen?: () => void;
+    onReconnectScheduled?: (delayMs: number) => void;
+    /** Max backoff between reconnect attempts (default 30s). */
+    maxBackoffMs?: number;
   }): { close: () => void } {
     const params = new URLSearchParams();
     if (options.projectId) params.set("project", options.projectId);
     const qs = params.toString();
     const url = `${this.baseUrl}/v1/events${qs ? `?${qs}` : ""}`;
+    const maxBackoff = options.maxBackoffMs ?? 30_000;
 
-    const ac = new AbortController();
     let closed = false;
+    let ac = new AbortController();
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const clearTimer = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const scheduleReconnect = (cause: unknown): void => {
+      if (closed) return;
+      const delay = Math.min(1000 * 2 ** attempt, maxBackoff);
+      attempt += 1;
+      options.onError?.(cause);
+      options.onReconnectScheduled?.(delay);
+      clearTimer();
+      timer = setTimeout(() => {
+        timer = null;
+        void run();
+      }, delay);
+    };
 
     const run = async (): Promise<void> => {
+      if (closed) return;
+      ac = new AbortController();
       try {
         const res = await this.fetchImpl(url, {
           headers: this.headers({ Accept: "text/event-stream" }),
           signal: ac.signal,
         });
         if (!res.ok || !res.body) {
-          throw new DaemonApiError(`SSE HTTP ${res.status}`, res.status, null);
+          throw new DaemonApiError(
+            res.status === 401 ? "Bearer token required" : `SSE HTTP ${res.status}`,
+            res.status,
+            null,
+          );
         }
+        attempt = 0;
         options.onOpen?.();
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
         while (!closed) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            if (!closed) {
+              scheduleReconnect(new Error("SSE stream ended"));
+            }
+            return;
+          }
           buffer += decoder.decode(value, { stream: true });
           const parts = buffer.split("\n\n");
           buffer = parts.pop() ?? "";
           for (const block of parts) {
-            const dataLine = block
-              .split("\n")
-              .find((l) => l.startsWith("data:"));
+            const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
             if (!dataLine) continue;
             const raw = dataLine.replace(/^data:\s?/, "").trim();
             if (!raw || raw === "[DONE]") continue;
@@ -221,9 +291,8 @@ export class DaemonClient {
           }
         }
       } catch (err) {
-        if (!closed && !(err instanceof DOMException && err.name === "AbortError")) {
-          options.onError?.(err);
-        }
+        if (closed || isAbortError(err)) return;
+        scheduleReconnect(err);
       }
     };
 
@@ -232,6 +301,7 @@ export class DaemonClient {
     return {
       close: () => {
         closed = true;
+        clearTimer();
         ac.abort();
       },
     };

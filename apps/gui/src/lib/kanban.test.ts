@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BoardTask } from "../api/types.js";
-import {
-  countActiveTasks,
-  groupTasksByStatus,
-  taskProgress,
-} from "./kanban.js";
+import { countActiveTasks, groupTasksByStatus, taskProgress } from "./kanban.js";
 
 function task(partial: Partial<BoardTask> & Pick<BoardTask, "id" | "status">): BoardTask {
   return {
@@ -30,9 +26,7 @@ describe("groupTasksByStatus", () => {
   });
 
   it("maps unknown status to todo", () => {
-    const board = groupTasksByStatus([
-      task({ id: "x", status: "weird" as BoardTask["status"] }),
-    ]);
+    const board = groupTasksByStatus([task({ id: "x", status: "weird" as BoardTask["status"] })]);
     expect(board.todo.map((t) => t.id)).toEqual(["x"]);
   });
 });

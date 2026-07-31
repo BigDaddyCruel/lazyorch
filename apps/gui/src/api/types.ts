@@ -1,4 +1,9 @@
-/** Daemon API types (client-side mirrors of OpenAPI / HTTP stubs). */
+/**
+ * Daemon API types (client-side mirrors of OpenAPI / HTTP stubs).
+ *
+ * Follow-up: generate or import from a shared OpenAPI/TS package when
+ * run-detail / gate HTTP lands (design: shared API client types).
+ */
 
 export const RUN_PHASES = [
   "Inception",

@@ -33,10 +33,7 @@ export function isRunPhase(value: unknown): value is RunPhase {
 
 export type PhaseStepState = "done" | "current" | "upcoming" | "terminal-fail" | "terminal-cancel";
 
-export function phaseStepState(
-  phase: string,
-  step: RunPhase,
-): PhaseStepState {
+export function phaseStepState(phase: string, step: RunPhase): PhaseStepState {
   if (phase === "Failed") return step === "Failed" ? "terminal-fail" : "done";
   if (phase === "Cancelled") return step === "Cancelled" ? "terminal-cancel" : "done";
 

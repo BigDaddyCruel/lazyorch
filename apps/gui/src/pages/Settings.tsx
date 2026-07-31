@@ -3,14 +3,15 @@ import { DEFAULT_SETTINGS, validateDaemonUrl, type GuiSettings } from "../lib/se
 import { useAppState } from "../state/AppState.js";
 
 export function SettingsPage() {
-  const { settings, updateSettings, refresh, connection, health } = useAppState();
+  const { settings, updateSettings, refresh, connection, health, lastError } = useAppState();
   const [draft, setDraft] = useState<GuiSettings>(settings);
   const [saved, setSaved] = useState(false);
   const urlError = validateDaemonUrl(draft.daemonUrl);
 
   const onSave = () => {
     if (urlError) return;
-    updateSettings({
+    // Return post-save client so refresh does not close over the previous instance
+    const nextClient = updateSettings({
       ...draft,
       daemonUrl: draft.daemonUrl.trim().replace(/\/+$/, ""),
       token: draft.token.trim(),
@@ -18,7 +19,7 @@ export function SettingsPage() {
     });
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2000);
-    void refresh();
+    void refresh(nextClient);
   };
 
   return (
@@ -73,22 +74,23 @@ export function SettingsPage() {
           <input
             type="checkbox"
             checked={draft.useDemoFallback}
-            onChange={(e) =>
-              setDraft((d) => ({ ...d, useDemoFallback: e.target.checked }))
-            }
+            onChange={(e) => setDraft((d) => ({ ...d, useDemoFallback: e.target.checked }))}
           />
-          Use demo board data when daemon has empty/unrich runs
+          Use demo board data when daemon is offline or returns empty runs (never on 401)
         </label>
+
+        {connection === "unauthorized" && (
+          <div className="alert warn">
+            {lastError ??
+              "Daemon requires a Bearer token. Paste ~/.lazyorch/daemon.token above and Save."}
+          </div>
+        )}
 
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
           <button type="button" className="btn primary" disabled={!!urlError} onClick={onSave}>
             Save & reconnect
           </button>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setDraft({ ...DEFAULT_SETTINGS })}
-          >
+          <button type="button" className="btn" onClick={() => setDraft({ ...DEFAULT_SETTINGS })}>
             Reset defaults
           </button>
           {saved && <span className="tag ok">Saved</span>}
@@ -110,9 +112,7 @@ export function SettingsPage() {
             <tr>
               <th>Health</th>
               <td>
-                {health
-                  ? `${health.status} (api ${health.api_major}, pid ${health.pid})`
-                  : "—"}
+                {health ? `${health.status} (api ${health.api_major}, pid ${health.pid})` : "—"}
               </td>
             </tr>
           </tbody>

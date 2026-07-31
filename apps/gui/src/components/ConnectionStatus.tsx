@@ -21,7 +21,7 @@ export function ConnectionStatus({
       : connection === "connecting"
         ? "Connecting…"
         : connection === "unauthorized"
-          ? "Auth required"
+          ? "Auth required (token)"
           : "Daemon offline";
 
   return (

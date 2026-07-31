@@ -14,17 +14,8 @@ const NAV: Array<{ id: PageId; label: string }> = [
 ];
 
 export function Layout({ children }: { children: ReactNode }) {
-  const {
-    page,
-    setPage,
-    connection,
-    settings,
-    runs,
-    health,
-    boardSource,
-    refresh,
-    refreshing,
-  } = useAppState();
+  const { page, setPage, connection, settings, runs, health, boardSource, refresh, refreshing } =
+    useAppState();
   const pendingGates = countPendingGatesAcrossRuns(runs);
 
   return (
@@ -62,9 +53,7 @@ export function Layout({ children }: { children: ReactNode }) {
           {boardSource && boardSource !== "daemon" && (
             <span className="tag warn">data: {boardSource}</span>
           )}
-          {pendingGates > 0 && (
-            <span className="tag warn">{pendingGates} gate(s) pending</span>
-          )}
+          {pendingGates > 0 && <span className="tag warn">{pendingGates} gate(s) pending</span>}
         </div>
       </aside>
       <main className="main">

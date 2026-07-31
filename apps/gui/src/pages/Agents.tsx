@@ -3,14 +3,8 @@ import { ModelTierDisplay } from "../components/ModelTierDisplay.js";
 import { useAppState } from "../state/AppState.js";
 
 export function AgentsPage() {
-  const {
-    runs,
-    selectedRun,
-    selectedRunId,
-    setSelectedRunId,
-    adapters,
-    modelRoute,
-  } = useAppState();
+  const { runs, selectedRun, selectedRunId, setSelectedRunId, adapters, modelRoute } =
+    useAppState();
   const run = selectedRun ?? runs[0] ?? null;
   const agents = run?.agents ?? [];
 

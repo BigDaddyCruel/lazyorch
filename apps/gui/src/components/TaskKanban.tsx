@@ -1,9 +1,5 @@
 import type { BoardTask } from "../api/types.js";
-import {
-  KANBAN_COLUMN_LABELS,
-  KANBAN_COLUMNS,
-  groupTasksByStatus,
-} from "../lib/kanban.js";
+import { KANBAN_COLUMN_LABELS, KANBAN_COLUMNS, groupTasksByStatus } from "../lib/kanban.js";
 
 export function TaskKanban({ tasks }: { tasks: BoardTask[] }) {
   const board = groupTasksByStatus(tasks);
@@ -11,8 +7,8 @@ export function TaskKanban({ tasks }: { tasks: BoardTask[] }) {
   if (tasks.length === 0) {
     return (
       <p className="empty">
-        No tasks for this run. Daemon run-detail APIs are still stubs — enable demo data in
-        Settings for a full board.
+        No tasks for this run. Daemon run-detail APIs are still stubs — enable demo data in Settings
+        for a full board.
       </p>
     );
   }

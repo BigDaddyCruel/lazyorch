@@ -25,7 +25,17 @@ export function HomePage() {
 
   return (
     <div className="stack">
-      {lastError && connection !== "online" && (
+      {connection === "unauthorized" && (
+        <div className="alert warn">
+          {lastError ?? "Authentication required."} Open{" "}
+          <button type="button" className="btn" onClick={() => setPage("settings")}>
+            Settings
+          </button>{" "}
+          and paste the daemon Bearer token. Demo board data is <strong>not</strong> shown while
+          unauthorized so live daemon state is never masked.
+        </div>
+      )}
+      {lastError && connection === "offline" && (
         <div className="alert warn">
           Daemon unreachable ({lastError}).{" "}
           {boardSource === "demo"

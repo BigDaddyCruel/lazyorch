@@ -16,7 +16,9 @@ export function countPendingGatesAcrossRuns(runs: readonly BoardRun[]): number {
   return n;
 }
 
-export function collectPendingGates(runs: readonly BoardRun[]): Array<BoardGate & { idea?: string }> {
+export function collectPendingGates(
+  runs: readonly BoardRun[],
+): Array<BoardGate & { idea?: string }> {
   const out: Array<BoardGate & { idea?: string }> = [];
   for (const run of runs) {
     for (const g of run.gates ?? []) {
