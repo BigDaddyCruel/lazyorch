@@ -5,10 +5,11 @@
  * - scheduler (assign + path-scope locks + router escalate on retry)
  * - task FSM
  * - forge integrate under global mutex (KD-33/34) — no lead agent slot
+ * - run-level QA ephemeral sessions (re-QA at tip before exit)
  * - replan hooks (prepareReplan / resumeAfterReplan from planning)
  * - terminal failed policy (KD-36)
  *
- * Does not implement full GitHub PR/CILoop (PR-17).
+ * Post-exit PrePR/CILoop/merge live in `lifecycle/` (PR-17).
  */
 
 import { generateId } from "@lazyorch/shared";
@@ -43,6 +44,7 @@ import {
   type WorktreePort,
 } from "../scheduler/index.js";
 import {
+  canStartQaSession,
   canStartReviewerSession,
   preferredAdaptersForRole,
 } from "../team/index.js";
@@ -59,9 +61,11 @@ import {
 import type {
   ForgeIntegratePort,
   IntegrationMutexPort,
+  QaSessionPort,
   ReviewerSessionPort,
   WorkerSessionPort,
 } from "./ports.js";
+import { applyQaOutcome, needsRunLevelQa } from "./qa.js";
 import {
   applyConflictStormPolicy,
   applyTerminalFailedPolicy,
@@ -80,6 +84,8 @@ export interface ImplementingTickParams {
   worker?: WorkerSessionPort;
   /** Optional: when set, drives review tasks this tick. */
   reviewer?: ReviewerSessionPort;
+  /** Optional: run-level QA when exit candidates need re-QA at tip. */
+  qa?: QaSessionPort;
   worktrees?: WorktreePort;
   config?: SchedulerConfig;
   routing?: AssignRoutingOptions;
@@ -91,6 +97,8 @@ export interface ImplementingTickParams {
   run_workers?: boolean;
   /** Process reviews this tick (default true when reviewer set). */
   run_reviews?: boolean;
+  /** Run run-level QA when needed (default true when qa set). */
+  run_qa?: boolean;
   /** Drain integrate queue this tick (default true). */
   run_integrates?: boolean;
   /** Max integrates this tick (default unlimited). */
@@ -111,6 +119,7 @@ export interface ImplementingTickParams {
   now?: () => string;
   nextAgentId?: () => string;
   nextGateId?: () => string;
+  nextTaskId?: () => string;
   budget_exhausted?: boolean;
   pause_elasticity?: boolean;
   /** Promote todo→ready when deps done (default true). */
@@ -129,6 +138,10 @@ export interface ImplementingTickResult {
     status: string;
     deferred?: boolean;
   }>;
+  /** Run-level QA outcomes this tick (0 or 1 typically). */
+  qa_outcomes: Array<{ passed: boolean; summary?: string }>;
+  /** Dynamic fix tasks opened by QA fail this tick. */
+  qa_fix_task_ids: string[];
   recovered_conflict_ids: string[];
   /** Conflict storm task ids left blocked at max_attempts. */
   conflict_storm_ids: string[];
@@ -167,6 +180,13 @@ function countActiveReviewers(sessions: readonly SchedulerSession[]): number {
   ).length;
 }
 
+function countActiveQa(sessions: readonly SchedulerSession[]): number {
+  return sessions.filter(
+    (s) =>
+      s.role === "qa" && (s.state === "running" || s.state === "starting"),
+  ).length;
+}
+
 /**
  * One Implementing-phase orchestration tick.
  */
@@ -190,6 +210,8 @@ export async function implementingTick(
   const worker_outcomes: ImplementingTickResult["worker_outcomes"] = [];
   const review_outcomes: ImplementingTickResult["review_outcomes"] = [];
   const integrate_results: ImplementingTickResult["integrate_results"] = [];
+  const qa_outcomes: ImplementingTickResult["qa_outcomes"] = [];
+  const qa_fix_task_ids: string[] = [];
   const recovered_conflict_ids: string[] = [];
   const conflict_storm_ids: string[] = [];
   const escalated_task_ids: string[] = [];
@@ -477,7 +499,96 @@ export async function implementingTick(
   gates.push(...terminal.gates);
   escalated_task_ids.push(...terminal.escalated_task_ids);
 
-  // 8. Optional exit
+  // 8. Run-level QA at tip when exit candidates need re-QA (ephemeral)
+  if (params.qa && params.run_qa !== false && needsRunLevelQa(run, tasks)) {
+    const freeSlots = Math.max(
+      0,
+      config.scheduling.max_concurrent_agents -
+        countHoldingSlots(runtime.sessions),
+    );
+    const canStart = canStartQaSession({
+      qa_work_pending: true,
+      active_qa: countActiveQa(runtime.sessions),
+      max_qa: config.team.max_qa,
+      free_slots: freeSlots,
+      mode_allows: config.team.mode !== "solo" || config.team.max_qa > 0,
+    });
+
+    if (canStart && run.feature_tip_sha) {
+      const preferred = preferredAdaptersForRole("qa");
+      const route: RouteResult = routeModel({
+        role: "qa",
+        preferred_adapters: [...preferred],
+        adapters: params.routing?.adapters ?? defaultAdaptersForRouting(),
+        ...(params.routing?.config !== undefined
+          ? { config: params.routing.config }
+          : {}),
+      });
+      const agentId = params.nextAgentId?.() ?? generateId("agt");
+      const runHandle = `qa_${run.id}_${nowMs}`;
+      const qaSession: SchedulerSession = {
+        run_handle: runHandle,
+        agent_id: agentId,
+        role: "qa",
+        state: "running",
+        adapter_id: route.adapter_id,
+        model: route.model,
+        model_tier: route.tier,
+        last_activity_ms: nowMs,
+      };
+      runtime = {
+        ...runtime,
+        sessions: [...runtime.sessions, qaSession],
+      };
+
+      const acceptance_hints = tasks
+        .filter((t) => t.status === "done")
+        .flatMap((t) => t.acceptance)
+        .slice(0, 20);
+
+      const outcome = await params.qa.run({
+        run_id: run.id,
+        feature_tip_sha: run.feature_tip_sha,
+        ...(run.feature_branch !== undefined
+          ? { feature_branch: run.feature_branch }
+          : {}),
+        agent_id: agentId,
+        adapter_id: route.adapter_id,
+        model: route.model,
+        model_tier: route.tier,
+        session_kind: route.session_kind,
+        ...(route.effort !== undefined ? { effort: route.effort } : {}),
+        cwd,
+        run_handle: runHandle,
+        ...(acceptance_hints.length > 0 ? { acceptance_hints } : {}),
+      });
+
+      const applied = applyQaOutcome(run, tasks, outcome, {
+        feature_tip_sha: run.feature_tip_sha,
+        ...(params.now !== undefined ? { now: params.now } : {}),
+        ...(params.nextTaskId !== undefined
+          ? { nextTaskId: params.nextTaskId }
+          : {}),
+      });
+      run = applied.run;
+      tasks = applied.tasks;
+      qa_outcomes.push({
+        passed: applied.passed,
+        ...(outcome.summary !== undefined ? { summary: outcome.summary } : {}),
+      });
+      for (const ft of applied.fix_tasks) {
+        qa_fix_task_ids.push(ft.id);
+      }
+
+      // Ephemeral QA exits after outcome
+      runtime = {
+        ...runtime,
+        sessions: runtime.sessions.filter((s) => s.run_handle !== runHandle),
+      };
+    }
+  }
+
+  // 9. Optional exit (PrePR or CILoop short-circuit when ready PR exists)
   let exited = false;
   if (params.try_exit && canExitImplementing(run, tasks)) {
     run = exitImplementing(run, tasks);
@@ -492,6 +603,8 @@ export async function implementingTick(
     worker_outcomes,
     review_outcomes,
     integrate_results,
+    qa_outcomes,
+    qa_fix_task_ids,
     recovered_conflict_ids,
     conflict_storm_ids,
     gates,

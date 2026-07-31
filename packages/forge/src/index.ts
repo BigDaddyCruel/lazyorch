@@ -1,7 +1,8 @@
 /**
  * @lazyorch/forge — git + github integration.
- * PR-11: local git worktrees + path-scope locks (no GitHub PR/CI yet).
- * PR-16: feature-branch integrate under global mutex (KD-33/34); no PR/CI yet.
+ * PR-11: local git worktrees + path-scope locks.
+ * PR-16: feature-branch integrate under global mutex (KD-33/34).
+ * PR-17: GitHub ensure_ready_pr, check poll, merge helpers + FakeGithubClient.
  */
 
 export const PACKAGE_NAME = "@lazyorch/forge" as const;
@@ -68,3 +69,36 @@ export {
   type IntegrateResult,
   type IntegrateStatus,
 } from "./integrate.js";
+
+// --- GitHub PR / CI / merge (PR-17) ---
+export {
+  FakeGithubClient,
+  EnsureReadyPrError,
+  ensureDraftPr,
+  ensureReadyPr,
+  evaluateChecks,
+  isCheckFailed,
+  isCheckOk,
+  isCheckPending,
+  pollCheckStatus,
+  MergePrError,
+  mergeReadyPr,
+  type CheckConclusion,
+  type CheckRun,
+  type CheckRunStatus,
+  type CreatePrInput,
+  type EnsureReadyPrAction,
+  type EnsureReadyPrRequest,
+  type EnsureReadyPrResult,
+  type FakeGithubCall,
+  type FakeGithubClientOptions,
+  type GithubClient,
+  type GithubPr,
+  type GithubPrState,
+  type MergeMethod,
+  type MergePrInput,
+  type MergePrResult,
+  type MergeReadyPrRequest,
+  type PollChecksRequest,
+  type PollChecksResult,
+} from "./github/index.js";

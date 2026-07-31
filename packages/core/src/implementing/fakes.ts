@@ -8,6 +8,9 @@ import type {
   ForgeIntegrateResult,
   IntegrationMutexAcquireResult,
   IntegrationMutexPort,
+  QaSessionOutcome,
+  QaSessionPort,
+  QaSessionRequest,
   ReviewerSessionOutcome,
   ReviewerSessionPort,
   ReviewerSessionRequest,
@@ -162,5 +165,29 @@ export class FakeReviewerSession implements ReviewerSessionPort {
       return this.fifo.shift()!;
     }
     return { decision: "approve", summary: "fake approve" };
+  }
+}
+
+/** Scripted run-level QA outcomes (FIFO). */
+export class FakeQaSession implements QaSessionPort {
+  readonly requests: QaSessionRequest[] = [];
+  private readonly fifo: QaSessionOutcome[] = [];
+
+  constructor(options?: { defaultQueue?: QaSessionOutcome[] }) {
+    if (options?.defaultQueue) {
+      this.fifo.push(...options.defaultQueue);
+    }
+  }
+
+  enqueue(...outcomes: QaSessionOutcome[]): void {
+    this.fifo.push(...outcomes);
+  }
+
+  async run(req: QaSessionRequest): Promise<QaSessionOutcome> {
+    this.requests.push(req);
+    if (this.fifo.length > 0) {
+      return this.fifo.shift()!;
+    }
+    return { passed: true, summary: "fake QA pass" };
   }
 }
