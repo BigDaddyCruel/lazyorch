@@ -4,6 +4,10 @@
  * Prevents concurrent tasks from writing overlapping paths.
  * Lock keys are derived from task `scope[]` globs; acquisition is in
  * sorted key order (global total order → deadlock-free).
+ *
+ * Acquisition is atomic (all keys or none): no partial hold-and-wait, so
+ * classic ABBA deadlock cannot occur. Sorted order matches KD-15 and keeps
+ * future wait/retry designs safe.
  */
 
 /** Kind of lock key after normalizing a scope glob. */
@@ -31,29 +35,52 @@ export function compareLockKeyIds(a: string, b: string): number {
 }
 
 /**
- * Normalize a scope glob: backslashes → `/`, strip leading `./`,
- * lower-case Windows drive letters.
+ * Normalize a scope glob: backslashes → `/`, collapse `/./` and duplicate
+ * slashes, strip leading `./` (repeated) and a leading `/` (scopes are
+ * repo-relative), lower-case Windows drive letters.
  */
 export function normalizeScope(scope: string): string {
   let s = scope.replace(/\\/g, "/").trim();
-  if (s.startsWith("./")) s = s.slice(2);
+
   // Lower-case drive letter: C:/foo → c:/foo
   if (/^[A-Za-z]:\//.test(s)) {
     s = s.charAt(0).toLowerCase() + s.slice(1);
   }
-  // Collapse duplicate slashes (except after drive?)
+
+  // Collapse /./ segments and duplicate slashes
+  while (s.includes("/./")) {
+    s = s.replace(/\/\.\//g, "/");
+  }
   s = s.replace(/\/+/g, "/");
+
+  // Strip leading ./ repeatedly
+  while (s.startsWith("./")) {
+    s = s.slice(2);
+  }
+  if (s.endsWith("/.")) {
+    s = s.slice(0, -2);
+  }
+  if (s === ".") {
+    s = "";
+  }
+
+  // Repo-relative: strip leading slash(es) so `/src/**` ≡ `src/**`.
+  // Keep Windows drive paths (c:/...) intact.
+  if (s.startsWith("/") && !/^[A-Za-z]:\//.test(s)) {
+    s = s.replace(/^\/+/, "");
+  }
+
   return s;
 }
 
 /**
  * Convert a scope glob to a lock key (conservative lattice).
  *
- * - `src/**` or `src/**\/*` → prefix `src/`
- * - `packages/core/src/index.ts` → exact
+ * - `src/**` → prefix `src/`
+ * - `packages/core/src/index.ts` → exact (known file suffix)
+ * - bare dirs (`packages/core`, `docs`) → prefix (no file suffix)
  * - `**` / `*` → root prefix (locks everything)
- * - Globs with star/question/brackets → prefix before the first glob segment
- *   (e.g. packages/<star>/src/** → prefix packages/)
+ * - Globs with star/question/brackets/braces → prefix before first glob segment
  */
 export function scopeToLockKey(scope: string): LockKey {
   let n = normalizeScope(scope);
@@ -84,26 +111,52 @@ export function scopeToLockKey(scope: string): LockKey {
     const before = n.slice(0, globIdx);
     const slash = before.lastIndexOf("/");
     if (slash <= 0) {
-      // Glob at top segment: e.g. *.ts
+      // Glob at top segment: e.g. *.ts or {a,b}/**
       return { kind: "prefix", path: "" };
     }
     const base = before.slice(0, slash);
     return { kind: "prefix", path: base.endsWith("/") ? base : `${base}/` };
   }
 
-  // Exact file or directory path (no globs)
   // Trailing slash or stripped dir-glob → prefix
   if (n.endsWith("/") || strippedDirGlob) {
     const path = n.endsWith("/") ? n : `${n}/`;
     return { kind: "prefix", path };
   }
+
+  // Bare paths: files (suffix) stay exact; directories become prefixes so
+  // "packages/core" conflicts with "packages/core/src/index.ts" (KD-15).
+  if (!looksLikeFilePath(n)) {
+    return { kind: "prefix", path: `${n}/` };
+  }
   return { kind: "exact", path: n };
+}
+
+/**
+ * True if the last path segment looks like a filename with an extension
+ * (e.g. index.ts). Bare segments without a suffix are treated as directories.
+ */
+export function looksLikeFilePath(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  if (base === "" || base === "." || base === "..") return false;
+  const dot = base.lastIndexOf(".");
+  // ".gitignore" / ".env" — leading-dot names without a further extension
+  // are config files; treat as exact files when they have more than the leading dot
+  // and a non-empty "extension" after another dot, else as files if only leading dot.
+  if (dot <= 0) {
+    // ".gitignore" → treat as file (common config); "Makefile" → directory-like prefix
+    return base.startsWith(".") && base.length > 1;
+  }
+  if (dot === base.length - 1) return false;
+  const ext = base.slice(dot + 1);
+  return /^[A-Za-z0-9]{1,16}$/.test(ext);
 }
 
 function findFirstGlobMeta(s: string): number {
   for (let i = 0; i < s.length; i++) {
     const c = s.charAt(i);
-    if (c === "*" || c === "?" || c === "[") return i;
+    // Brace groups are globs under KD-15 conservative lattice
+    if (c === "*" || c === "?" || c === "[" || c === "{") return i;
   }
   return -1;
 }
@@ -169,6 +222,8 @@ export type AcquireResult =
  * In-process path-scope lock manager.
  *
  * Acquisition is atomic over the full key set after sorting (deadlock-free).
+ * An empty `scopes` list is a no-op success (`ok: true`, `keys: []`) — useful
+ * when callers only lock when coding scopes exist.
  * Locks stay until explicit release (including while task is `blocked`).
  */
 export class PathScopeLockManager {
@@ -183,6 +238,7 @@ export class PathScopeLockManager {
    * Try to acquire all lock keys for `scopes` on behalf of `holderId`.
    * Keys are computed, sorted, then granted atomically or not at all.
    * Re-acquiring the same scopes for the same holder is idempotent.
+   * Empty `scopes` succeeds with no keys held (no-op).
    */
   tryAcquire(holderId: string, scopes: readonly string[]): AcquireResult {
     if (holderId === "") {
@@ -215,6 +271,11 @@ export class PathScopeLockManager {
 
     if (conflicts.length > 0) {
       return { ok: false, conflicts };
+    }
+
+    // Empty scope list: no-op success (do not register a holder entry)
+    if (sortedIds.length === 0) {
+      return { ok: true, keys: [] };
     }
 
     // Grant all keys (idempotent for same holder)

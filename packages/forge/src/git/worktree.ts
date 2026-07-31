@@ -70,10 +70,12 @@ export interface RemoveWorktreeOptions {
   /**
    * Force-remove worktree even if dirty (`git worktree remove --force`).
    * Default false — dirty trees must be resolved (no stash-auto).
+   * Does **not** force-delete the branch; use `forceBranch` for `-D`.
    */
   force?: boolean;
-  /** When true and branch set, delete branch with `git branch -d` (or -D if forceBranch). */
+  /** When true and branch set, delete branch with `git branch -d` (or `-D` if forceBranch). */
   deleteBranch?: boolean;
+  /** When true, delete branch with `git branch -D` (uncoupled from worktree `force`). */
   forceBranch?: boolean;
 }
 
@@ -103,10 +105,35 @@ export function taskBranchName(runId: string, taskId: string): string {
 }
 
 /**
+ * Canonical string for hashing a repo root so Windows path variants
+ * (drive-letter case, separators, trailing slash) map to one worktree root.
+ */
+export function normalizeRepoRootForHash(repoRoot: string): string {
+  const asPosix = repoRoot.replace(/\\/g, "/").trim();
+
+  // Windows drive path (even when running tests on non-Windows)
+  if (/^[A-Za-z]:(\/|$)/.test(asPosix)) {
+    let p = asPosix.toLowerCase();
+    // Strip trailing slash except keep "c:" form stable as "c:"
+    if (p.length > 2 && p.endsWith("/")) p = p.slice(0, -1);
+    return p;
+  }
+
+  let abs = resolve(repoRoot).replace(/\\/g, "/");
+  if (process.platform === "win32") {
+    abs = abs.toLowerCase();
+  }
+  if (abs.length > 1 && abs.endsWith("/")) {
+    abs = abs.slice(0, -1);
+  }
+  return abs;
+}
+
+/**
  * Short stable hash of an absolute repo root (for Windows worktree path segment).
  */
 export function hashRepoRoot(repoRoot: string): string {
-  const abs = resolve(repoRoot);
+  const abs = normalizeRepoRootForHash(repoRoot);
   return createHash("sha256").update(abs).digest("hex").slice(0, 12);
 }
 
@@ -122,8 +149,7 @@ export function defaultWorktreeRoot(
 ): string {
   const absRepo = resolve(repoRoot);
   if (platform === "win32") {
-    const home =
-      process.env.USERPROFILE ?? process.env.HOME ?? process.env.HOMEPATH;
+    const home = windowsHomeDir();
     if (!home) {
       // Fallback inside repo if home is missing
       return join(absRepo, ".lazyorch", "worktrees");
@@ -132,6 +158,22 @@ export function defaultWorktreeRoot(
     return join(home, ".lazyorch", "worktrees", hash);
   }
   return join(absRepo, ".lazyorch", "worktrees");
+}
+
+/**
+ * Windows home directory: USERPROFILE, else HOMEDRIVE+HOMEPATH.
+ * Bare HOMEPATH alone is drive-relative and is not used.
+ */
+function windowsHomeDir(): string | undefined {
+  const profile = process.env.USERPROFILE;
+  if (profile && profile.trim() !== "") return profile;
+
+  const drive = process.env.HOMEDRIVE;
+  const path = process.env.HOMEPATH;
+  if (drive && path) {
+    return `${drive}${path}`;
+  }
+  return undefined;
 }
 
 /**
@@ -229,9 +271,10 @@ export async function removeWorktree(
   }
 
   if (opts.deleteBranch && opts.branch) {
+    // forceBranch alone controls -D; worktree force does not delete unique commits
     const branchArgs = [
       "branch",
-      opts.forceBranch || opts.force ? "-D" : "-d",
+      opts.forceBranch === true ? "-D" : "-d",
       opts.branch,
     ];
     commands.push(branchArgs);
@@ -257,7 +300,10 @@ export async function isWorktreeClean(
   return result.stdout.trim() === "";
 }
 
-/** Ids used in branch/path segments: no slashes, `..`, or control chars. */
+/** Windows-forbidden filename characters (excluding controls checked separately). */
+const UNSAFE_ID_CHARS = /[<>:"|?*]/;
+
+/** Ids used in branch/path segments: safe single path segments. */
 function assertSafeId(id: string, label: string): void {
   if (id === "" || id === "." || id === "..") {
     throw new Error(`Invalid ${label}: empty or dot segment`);
@@ -270,6 +316,19 @@ function assertSafeId(id: string, label: string): void {
   ) {
     throw new Error(
       `Invalid ${label}: must not contain path separators or '..' (${id})`,
+    );
+  }
+  for (let i = 0; i < id.length; i++) {
+    const code = id.charCodeAt(i);
+    if (code < 32) {
+      throw new Error(
+        `Invalid ${label}: contains control character (${id})`,
+      );
+    }
+  }
+  if (UNSAFE_ID_CHARS.test(id)) {
+    throw new Error(
+      `Invalid ${label}: contains forbidden filename character (${id})`,
     );
   }
 }

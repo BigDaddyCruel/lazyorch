@@ -3,6 +3,7 @@ import {
   PathScopeLockManager,
   lockKeyId,
   lockKeysConflict,
+  looksLikeFilePath,
   normalizeScope,
   pathUnderPrefix,
   scopeToLockKey,
@@ -16,8 +17,18 @@ describe("normalizeScope", () => {
     expect(normalizeScope("src\\foo\\bar")).toBe("src/foo/bar");
   });
 
-  it("strips leading ./", () => {
+  it("strips leading ./ repeatedly", () => {
     expect(normalizeScope("./src/**")).toBe("src/**");
+    expect(normalizeScope("././src/**")).toBe("src/**");
+  });
+
+  it("collapses /./ segments", () => {
+    expect(normalizeScope("src/./foo/**")).toBe("src/foo/**");
+  });
+
+  it("strips leading slash so /src/** ≡ src/**", () => {
+    expect(normalizeScope("/src/**")).toBe("src/**");
+    expect(normalizeScope("//src/a")).toBe("src/a");
   });
 
   it("lower-cases Windows drive letters", () => {
@@ -45,6 +56,15 @@ describe("scopeToLockKey", () => {
     expect(scopeToLockKey("docs/")).toEqual({ kind: "prefix", path: "docs/" });
   });
 
+  it("maps bare directories to prefix (not exact)", () => {
+    expect(scopeToLockKey("packages/core")).toEqual({
+      kind: "prefix",
+      path: "packages/core/",
+    });
+    expect(scopeToLockKey("docs")).toEqual({ kind: "prefix", path: "docs/" });
+    expect(looksLikeFilePath("packages/core")).toBe(false);
+  });
+
   it("maps ** / * to root prefix", () => {
     expect(scopeToLockKey("**")).toEqual({ kind: "prefix", path: "" });
     expect(scopeToLockKey("*")).toEqual({ kind: "prefix", path: "" });
@@ -62,6 +82,17 @@ describe("scopeToLockKey", () => {
       kind: "prefix",
       path: "packages/",
     });
+  });
+
+  it("treats brace globs conservatively", () => {
+    expect(scopeToLockKey("src/{a,b}/**")).toEqual({
+      kind: "prefix",
+      path: "src/",
+    });
+  });
+
+  it("equates leading-slash scopes with repo-relative", () => {
+    expect(scopeToLockKey("/src/**")).toEqual(scopeToLockKey("src/**"));
   });
 });
 
@@ -104,6 +135,23 @@ describe("lockKeysConflict / scopesConflict", () => {
       true,
     );
     expect(scopesConflict("packages/core/**", "packages/forge/**")).toBe(false);
+  });
+
+  it("bare directory conflicts with nested file", () => {
+    expect(scopesConflict("packages/core", "packages/core/src/index.ts")).toBe(
+      true,
+    );
+    expect(scopesConflict("docs", "docs/a.md")).toBe(true);
+  });
+
+  it("leading slash scopes conflict with non-slash peers", () => {
+    expect(scopesConflict("/src/**", "src/**")).toBe(true);
+    expect(scopesConflict("/src/**", "src/foo.ts")).toBe(true);
+  });
+
+  it("brace scopes conflict with either arm under parent", () => {
+    expect(scopesConflict("src/{a,b}/**", "src/a/x.ts")).toBe(true);
+    expect(scopesConflict("src/{a,b}/**", "src/b/**")).toBe(true);
   });
 });
 
@@ -180,8 +228,19 @@ describe("PathScopeLockManager", () => {
     expect(mgr.tryAcquire("tsk_b2", ["m/other.ts"]).ok).toBe(true);
     // Sibling of a/** ok
     expect(mgr.tryAcquire("tsk_c", ["b/**"]).ok).toBe(true);
-    // Overlap on z/** fails even with an extra free scope
+
+    const before = mgr.listHeld();
+    // Overlap on z/** fails even with an extra free scope — no partial grant
     expect(mgr.tryAcquire("tsk_d", ["z/nested/**", "free/**"]).ok).toBe(false);
+    expect(mgr.holderOf("p:free/")).toBeUndefined();
+    expect(mgr.listHeld()).toEqual(before);
+    expect(mgr.isHolder("tsk_d")).toBe(false);
+  });
+
+  it("empty scopes is a no-op success", () => {
+    const r = mgr.tryAcquire("tsk_empty", []);
+    expect(r).toEqual({ ok: true, keys: [] });
+    expect(mgr.listHeld()).toEqual([]);
   });
 
   it("detectConflicts reports holders without acquiring", () => {
