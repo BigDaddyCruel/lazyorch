@@ -7,7 +7,10 @@ import { generateId } from "@lazyorch/shared";
 import { transitionRunPhase } from "../orchestrator/run-fsm.js";
 import type { Gate, GateStatus } from "../types/gate.js";
 import type { Run } from "../types/run.js";
-import type { FreezeValidationError } from "./types.js";
+import type {
+  FreezeValidationError,
+  FrozenPlanResult,
+} from "./types.js";
 
 const DEFAULT_TIMEOUT_NOTIFY_HOURS = 1;
 
@@ -26,6 +29,37 @@ function timeoutAt(
   const ms = Date.parse(createdAt) + timeoutNotifyHours * 3_600_000;
   return new Date(ms).toISOString();
 }
+
+/** Shared preconditions for apply* helpers. */
+function assertPendingGate(gate: Gate, fn: string): void {
+  if (gate.status !== "pending") {
+    throw new Error(
+      `${fn}: gate ${gate.id} is ${gate.status}, expected pending`,
+    );
+  }
+}
+
+function assertGateRunMatch(gate: Gate, run: Run, fn: string): void {
+  if (gate.run_id !== run.id) {
+    throw new Error(
+      `${fn}: gate.run_id ${gate.run_id} !== run.id ${run.id}`,
+    );
+  }
+}
+
+function assertPlanningPhase(
+  run: Run,
+  fn: string,
+  allowed: ReadonlySet<string>,
+): void {
+  if (!allowed.has(run.phase)) {
+    throw new Error(
+      `${fn}: requires phase ${[...allowed].join("|")}, got ${run.phase}`,
+    );
+  }
+}
+
+const PLANNING_OR_CONSENSUS = new Set(["Planning", "PlanConsensus"]);
 
 export interface CreatePlanGateBase {
   run_id: string;
@@ -101,6 +135,8 @@ export const PLAN_MAX_ROUNDS_ACTIONS = [
 ] as const;
 export type PlanMaxRoundsAction = (typeof PLAN_MAX_ROUNDS_ACTIONS)[number];
 
+const PLAN_MAX_ROUNDS_ACTION_SET = new Set<string>(PLAN_MAX_ROUNDS_ACTIONS);
+
 /**
  * plan_max_rounds — open when consensus exhausts rounds.
  * Payload lists allowed actions; human picks force_approve | edit | abort.
@@ -137,11 +173,33 @@ export function createPlanMaxRoundsGate(
   };
 }
 
+/**
+ * Allowed actions for a plan_max_rounds gate (payload.actions or full set).
+ */
+export function allowedPlanMaxRoundsActions(
+  gate: Gate,
+): readonly PlanMaxRoundsAction[] {
+  const raw = gate.payload.actions;
+  if (Array.isArray(raw) && raw.length > 0) {
+    const filtered = raw.filter(
+      (a): a is PlanMaxRoundsAction =>
+        typeof a === "string" && PLAN_MAX_ROUNDS_ACTION_SET.has(a),
+    );
+    if (filtered.length > 0) return filtered;
+  }
+  return PLAN_MAX_ROUNDS_ACTIONS;
+}
+
 export interface ResolveGateOptions {
   resolved_by?: string;
   /** Extra payload fields merged (e.g. action for plan_max_rounds). */
   payload?: Record<string, unknown>;
   now?: () => string;
+  /**
+   * When true (default for apply* helpers), reject non-pending gates.
+   * Low-level resolveGate defaults false so callers can force-mark timed_out.
+   */
+  require_pending?: boolean;
 }
 
 /** Build resolve options without passing explicit undefined (exactOptionalPropertyTypes). */
@@ -156,12 +214,20 @@ function resolveOpts(
   return o;
 }
 
-/** Mark a gate resolved (approved | rejected | timed_out). */
+/**
+ * Mark a gate resolved (approved | rejected | timed_out).
+ * Apply* helpers enforce pending first; set require_pending:true for strict use.
+ */
 export function resolveGate(
   gate: Gate,
   status: Exclude<GateStatus, "pending">,
   opts?: ResolveGateOptions,
 ): Gate {
+  if (opts?.require_pending === true && gate.status !== "pending") {
+    throw new Error(
+      `resolveGate: gate ${gate.id} is ${gate.status}, expected pending`,
+    );
+  }
   const resolved_at = nowIso(opts?.now);
   const next: Gate = {
     ...gate,
@@ -199,8 +265,13 @@ export function applyPlanApproveDecision(
   },
 ): ResolvePlanApproveResult {
   if (gate.type !== "plan_approve") {
-    throw new Error(`applyPlanApproveDecision requires plan_approve, got ${gate.type}`);
+    throw new Error(
+      `applyPlanApproveDecision requires plan_approve, got ${gate.type}`,
+    );
   }
+  assertPendingGate(gate, "applyPlanApproveDecision");
+  assertGateRunMatch(gate, run, "applyPlanApproveDecision");
+
   const ts = nowIso(opts?.now);
   const nowFn = () => ts;
   if (decision === "approve") {
@@ -285,19 +356,26 @@ export function applyPlanDisputeDecision(
   },
 ): ResolvePlanDisputeResult {
   if (gate.type !== "plan_dispute") {
-    throw new Error(`applyPlanDisputeDecision requires plan_dispute, got ${gate.type}`);
+    throw new Error(
+      `applyPlanDisputeDecision requires plan_dispute, got ${gate.type}`,
+    );
   }
+  assertPendingGate(gate, "applyPlanDisputeDecision");
+  assertGateRunMatch(gate, run, "applyPlanDisputeDecision");
+
   const ts = nowIso(opts?.now);
   const nowFn = () => ts;
 
   if (resolution === "abort") {
-    let nextRun = run;
-    if (run.phase === "Planning" || run.phase === "PlanConsensus") {
-      nextRun = transitionRunPhase(run, "Cancelled", {
-        updated_at: ts,
-        cancelled_reason: "plan_dispute aborted",
-      });
-    }
+    assertPlanningPhase(
+      run,
+      "applyPlanDisputeDecision abort",
+      PLANNING_OR_CONSENSUS,
+    );
+    const nextRun = transitionRunPhase(run, "Cancelled", {
+      updated_at: ts,
+      cancelled_reason: "plan_dispute aborted",
+    });
     return {
       gate: resolveGate(
         gate,
@@ -308,6 +386,13 @@ export function applyPlanDisputeDecision(
       resolution,
     };
   }
+
+  // accept_wontfix / force_addressed — stay in Planning for resume
+  assertPlanningPhase(
+    run,
+    "applyPlanDisputeDecision",
+    PLANNING_OR_CONSENSUS,
+  );
 
   return {
     gate: resolveGate(
@@ -346,17 +431,29 @@ export function applyPlanMaxRoundsDecision(
       `applyPlanMaxRoundsDecision requires plan_max_rounds, got ${gate.type}`,
     );
   }
+  assertPendingGate(gate, "applyPlanMaxRoundsDecision");
+  assertGateRunMatch(gate, run, "applyPlanMaxRoundsDecision");
+
+  const allowed = allowedPlanMaxRoundsActions(gate);
+  if (!allowed.includes(action)) {
+    throw new Error(
+      `applyPlanMaxRoundsDecision: action ${action} not in allowed [${allowed.join(", ")}]`,
+    );
+  }
+
   const ts = nowIso(opts?.now);
   const nowFn = () => ts;
 
   if (action === "abort") {
-    let nextRun = run;
-    if (run.phase === "Planning" || run.phase === "PlanConsensus") {
-      nextRun = transitionRunPhase(run, "Cancelled", {
-        updated_at: ts,
-        cancelled_reason: "plan_max_rounds abort",
-      });
-    }
+    assertPlanningPhase(
+      run,
+      "applyPlanMaxRoundsDecision abort",
+      PLANNING_OR_CONSENSUS,
+    );
+    const nextRun = transitionRunPhase(run, "Cancelled", {
+      updated_at: ts,
+      cancelled_reason: "plan_max_rounds abort",
+    });
     return {
       gate: resolveGate(
         gate,
@@ -369,6 +466,12 @@ export function applyPlanMaxRoundsDecision(
   }
 
   // force_approve | edit — approved; freeze / re-review is caller's job
+  assertPlanningPhase(
+    run,
+    "applyPlanMaxRoundsDecision",
+    PLANNING_OR_CONSENSUS,
+  );
+
   return {
     gate: resolveGate(
       gate,
@@ -388,4 +491,86 @@ export function shouldOpenPlanApproveGate(
   gatesConfig: { plan_approve?: boolean } | undefined,
 ): boolean {
   return gatesConfig?.plan_approve !== false;
+}
+
+/**
+ * Auto-advance PlanConsensus → Implementing when plan_approve is disabled.
+ * No-op when already Implementing; throws if phase is anything else.
+ */
+export function autoAdvanceAfterPlanFreeze(
+  run: Run,
+  opts?: { now?: () => string },
+): Run {
+  if (run.phase === "Implementing") return run;
+  if (run.phase !== "PlanConsensus") {
+    throw new Error(
+      `autoAdvanceAfterPlanFreeze requires PlanConsensus, got ${run.phase}`,
+    );
+  }
+  const ts = nowIso(opts?.now);
+  return transitionRunPhase(run, "Implementing", { updated_at: ts });
+}
+
+export interface OpenGatesAfterForceApproveOpts {
+  /** gates.plan_approve (default true → open gate; false → auto Implementing). */
+  plan_approve?: boolean;
+  now?: () => string;
+  nextId?: () => string;
+}
+
+export interface OpenGatesAfterForceApproveResult {
+  run: Run;
+  gates: Gate[];
+}
+
+/**
+ * After plan_max_rounds force_approve + completeForceApprove freeze:
+ * - plan_approve enabled (default) → open plan_approve gate, stay PlanConsensus
+ * - plan_approve disabled → auto-advance PlanConsensus → Implementing
+ */
+export function openGatesAfterForceApprove(
+  run: Run,
+  frozen: FrozenPlanResult,
+  opts?: OpenGatesAfterForceApproveOpts,
+): OpenGatesAfterForceApproveResult {
+  if (frozen.status !== "frozen") {
+    throw new Error(
+      `openGatesAfterForceApprove requires frozen result, got ${frozen.status}`,
+    );
+  }
+  if (run.phase !== "PlanConsensus" && run.phase !== "Implementing") {
+    throw new Error(
+      `openGatesAfterForceApprove requires PlanConsensus (post-freeze), got ${run.phase}`,
+    );
+  }
+
+  if (!shouldOpenPlanApproveGate(opts)) {
+    const advanced = autoAdvanceAfterPlanFreeze(run, {
+      ...(opts?.now !== undefined ? { now: opts.now } : {}),
+    });
+    return { run: advanced, gates: [] };
+  }
+
+  const gateOpts: CreatePlanGateBase & {
+    freeze_hash?: string;
+    residual_risks?: string[];
+  } = {
+    run_id: run.id,
+    plan_id: frozen.plan.id,
+    revision: frozen.plan.revision,
+    freeze_hash: frozen.freeze_hash,
+  };
+  if (opts?.now !== undefined) gateOpts.now = opts.now;
+  if (opts?.nextId !== undefined) gateOpts.nextId = opts.nextId;
+  if (
+    frozen.plan.residual_risks !== undefined &&
+    frozen.plan.residual_risks.length > 0
+  ) {
+    gateOpts.residual_risks = frozen.plan.residual_risks;
+  }
+
+  return {
+    run,
+    gates: [createPlanApproveGate(gateOpts)],
+  };
 }

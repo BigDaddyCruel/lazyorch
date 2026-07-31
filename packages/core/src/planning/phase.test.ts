@@ -6,6 +6,7 @@ import {
   applyPlanApproveDecision,
   completeForceApprove,
   applyPlanMaxRoundsDecision,
+  openGatesAfterForceApprove,
 } from "./index.js";
 import { runPlanningPhase } from "./phase.js";
 import { FakePlanningSession } from "./session-fakes.js";
@@ -110,7 +111,7 @@ describe("runPlanningPhase (E2E freeze via fake sessions)", () => {
     expect(approved.gate.status).toBe("approved");
   });
 
-  it("skips plan_approve when gates.plan_approve=false", async () => {
+  it("auto-advances to Implementing when gates.plan_approve=false", async () => {
     resetIds();
     const session = new FakePlanningSession({
       writes: [writeResult()],
@@ -128,6 +129,8 @@ describe("runPlanningPhase (E2E freeze via fake sessions)", () => {
     });
     expect(phase.result.status).toBe("frozen");
     expect(phase.gates).toEqual([]);
+    // Design: PlanConsensus → Implementing when plan_approve is disabled
+    expect(phase.run.phase).toBe("Implementing");
     expect(phase.writer_route?.tier).toBe("large");
   });
 
@@ -226,7 +229,7 @@ describe("runPlanningPhase (E2E freeze via fake sessions)", () => {
     ]);
   });
 
-  it("solo collapse shares writer/reviewer agent when requested", async () => {
+  it("solo collapse shares agent id with plan_reviewer role view", async () => {
     resetIds();
     const session = new FakePlanningSession({
       writes: [writeResult()],
@@ -245,11 +248,13 @@ describe("runPlanningPhase (E2E freeze via fake sessions)", () => {
     });
     expect(phase.collapsed).toBe(true);
     expect(phase.writer_agent.id).toBe(phase.reviewer_agent.id);
+    expect(phase.writer_agent.role).toBe("plan_writer");
+    expect(phase.reviewer_agent.role).toBe("plan_reviewer");
     // solo still opens plan_approve (compensating gate)
     expect(phase.gates[0]?.type).toBe("plan_approve");
   });
 
-  it("force_approve path after max_rounds freezes with residual risks", async () => {
+  it("force_approve path freezes then opens follow-on plan_approve", async () => {
     resetIds();
     const artifacts = validArtifacts([draftTask("tsk_a")]);
     const openIss = issue({
@@ -297,5 +302,25 @@ describe("runPlanningPhase (E2E freeze via fake sessions)", () => {
     expect(frozen.run.phase).toBe("PlanConsensus");
     expect(frozen.result.plan.residual_risks?.length).toBeGreaterThan(0);
     expect(phase.writer_route?.tier).toBe("large");
+
+    // Design: after force_approve freeze → normal plan_approve if enabled
+    const followOn = openGatesAfterForceApprove(frozen.run, frozen.result, {
+      now: () => FIXED,
+      nextId: nextGateId,
+    });
+    expect(followOn.run.phase).toBe("PlanConsensus");
+    expect(followOn.gates).toHaveLength(1);
+    expect(followOn.gates[0]?.type).toBe("plan_approve");
+    expect(followOn.gates[0]?.payload.residual_risks?.length).toBeGreaterThan(
+      0,
+    );
+
+    const approved = applyPlanApproveDecision(
+      followOn.run,
+      followOn.gates[0]!,
+      "approve",
+      { now: () => FIXED },
+    );
+    expect(approved.run.phase).toBe("Implementing");
   });
 });

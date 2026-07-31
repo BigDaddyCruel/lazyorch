@@ -19,6 +19,7 @@ import {
   type RunConsensusParams,
 } from "./consensus.js";
 import {
+  autoAdvanceAfterPlanFreeze,
   createPlanApproveGate,
   createPlanDisputeGate,
   createPlanMaxRoundsGate,
@@ -62,7 +63,10 @@ export interface RunPlanningPhaseParams {
 export interface PlanningPhaseResult {
   result: ConsensusResult;
   run: Run;
-  /** Gates opened by this phase (pending). Empty when frozen + plan_approve off. */
+  /**
+   * Gates opened by this phase (pending).
+   * Empty when frozen + plan_approve off (run auto-advanced to Implementing).
+   */
   gates: Gate[];
   writer: SessionPlanWriter;
   reviewer: SessionPlanReviewer;
@@ -70,7 +74,11 @@ export interface PlanningPhaseResult {
   reviewer_agent: Agent;
   writer_route: RouteResult | undefined;
   reviewer_route: RouteResult | undefined;
-  /** True when writer and reviewer share the same agent id (solo collapse). */
+  /**
+   * True when writer and reviewer share the same agent id (solo collapse).
+   * reviewer_agent is a plan_reviewer-labeled view of the same id for
+   * observability; handlers still route by hard-coded role.
+   */
   collapsed: boolean;
 }
 
@@ -78,7 +86,8 @@ export interface PlanningPhaseResult {
  * Wire planning: mint plan agents → session-backed ports → consensus → plan gates.
  *
  * On freeze:
- * - optionally open plan_approve (default on)
+ * - plan_approve enabled (default): open plan_approve, stay PlanConsensus
+ * - plan_approve disabled: auto PlanConsensus → Implementing (no gate)
  * On max_rounds:
  * - open plan_max_rounds
  * On dispute:
@@ -111,9 +120,15 @@ export async function runPlanningPhase(
       : {}),
   });
 
-  // Solo collapse: same agent instance for writer + reviewer (design rule 1).
-  const reviewer_agent = collapse
-    ? writer_agent
+  // Solo collapse: same agent id for writer + reviewer (design rule 1).
+  // reviewer_agent is a plan_reviewer-labeled view so role metadata is correct
+  // for persistence/observability while id stays shared.
+  const reviewer_agent: Agent = collapse
+    ? {
+        ...writer_agent,
+        role: "plan_reviewer",
+        labels: ["plan-reviewer", "plan_reviewer", "plan-review"],
+      }
     : mintPlanAgent({
         run_id: params.run.id,
         role: "plan_reviewer",
@@ -165,7 +180,7 @@ export async function runPlanningPhase(
   }
   if (params.now !== undefined) consensusParams.now = params.now;
 
-  const { result, run } = await runConsensus(consensusParams);
+  const { result, run: consensusRun } = await runConsensus(consensusParams);
 
   const gateOpts: {
     plan_approve: boolean;
@@ -176,7 +191,8 @@ export async function runPlanningPhase(
   };
   if (params.now !== undefined) gateOpts.now = params.now;
   if (params.nextGateId !== undefined) gateOpts.nextId = params.nextGateId;
-  const gates = openGatesForResult(result, run, gateOpts);
+
+  const { gates, run } = applyPostConsensusGates(result, consensusRun, gateOpts);
 
   return {
     result,
@@ -192,7 +208,10 @@ export async function runPlanningPhase(
   };
 }
 
-function openGatesForResult(
+/**
+ * After consensus: open the right gate(s) and/or auto-advance when plan_approve is off.
+ */
+export function applyPostConsensusGates(
   result: ConsensusResult,
   run: Run,
   opts: {
@@ -200,7 +219,7 @@ function openGatesForResult(
     now?: () => string;
     nextId?: () => string;
   },
-): Gate[] {
+): { gates: Gate[]; run: Run } {
   const base = {
     run_id: run.id,
     plan_id: result.plan.id,
@@ -210,34 +229,49 @@ function openGatesForResult(
   };
 
   if (result.status === "frozen") {
-    if (!opts.plan_approve) return [];
-    return [
-      createPlanApproveGate({
-        ...base,
-        freeze_hash: result.freeze_hash,
-        ...(result.plan.residual_risks !== undefined
-          ? { residual_risks: result.plan.residual_risks }
-          : {}),
-      }),
-    ];
+    if (!opts.plan_approve) {
+      // Auto path: PlanConsensus → Implementing (no pending gate).
+      const advanced = autoAdvanceAfterPlanFreeze(run, {
+        ...(opts.now !== undefined ? { now: opts.now } : {}),
+      });
+      return { gates: [], run: advanced };
+    }
+    return {
+      run,
+      gates: [
+        createPlanApproveGate({
+          ...base,
+          freeze_hash: result.freeze_hash,
+          ...(result.plan.residual_risks !== undefined
+            ? { residual_risks: result.plan.residual_risks }
+            : {}),
+        }),
+      ],
+    };
   }
 
   if (result.status === "max_rounds") {
-    return [
-      createPlanMaxRoundsGate({
-        ...base,
-        rounds: result.rounds,
-        open_issues: result.open_issues,
-        validation_errors: result.validation_errors,
-      }),
-    ];
+    return {
+      run,
+      gates: [
+        createPlanMaxRoundsGate({
+          ...base,
+          rounds: result.rounds,
+          open_issues: result.open_issues,
+          validation_errors: result.validation_errors,
+        }),
+      ],
+    };
   }
 
   // dispute
-  return [
-    createPlanDisputeGate({
-      ...base,
-      disputed_issue_ids: result.disputed_issue_ids,
-    }),
-  ];
+  return {
+    run,
+    gates: [
+      createPlanDisputeGate({
+        ...base,
+        disputed_issue_ids: result.disputed_issue_ids,
+      }),
+    ],
+  };
 }

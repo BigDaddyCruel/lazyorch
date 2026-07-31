@@ -71,18 +71,24 @@ export {
   createPlanApproveGate,
   createPlanDisputeGate,
   createPlanMaxRoundsGate,
+  allowedPlanMaxRoundsActions,
   resolveGate,
   applyPlanApproveDecision,
   applyPlanDisputeDecision,
   applyPlanMaxRoundsDecision,
   shouldOpenPlanApproveGate,
+  autoAdvanceAfterPlanFreeze,
+  openGatesAfterForceApprove,
   type PlanMaxRoundsAction,
   type PlanRejectAction,
   type PlanDisputeResolution,
   type CreatePlanGateBase,
+  type ResolveGateOptions,
   type ResolvePlanApproveResult,
   type ResolvePlanDisputeResult,
   type ResolvePlanMaxRoundsResult,
+  type OpenGatesAfterForceApproveOpts,
+  type OpenGatesAfterForceApproveResult,
 } from "./gates.js";
 
 export {
@@ -101,6 +107,7 @@ export {
 
 export {
   runPlanningPhase,
+  applyPostConsensusGates,
   type RunPlanningPhaseParams,
   type PlanningPhaseResult,
 } from "./phase.js";

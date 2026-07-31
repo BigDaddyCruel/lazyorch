@@ -17,8 +17,6 @@ export function planningSignals(
   overrides?: Partial<ComplexitySignals>,
 ): ComplexitySignals {
   return {
-    role,
-    task_origin: "plan",
     task_type_labels: ["plan"],
     scope_path_count: 0,
     depends_on_count: 0,
@@ -28,6 +26,9 @@ export function planningSignals(
     acceptance_command_count: 0,
     title_desc_chars: 0,
     ...overrides,
+    // Force planning identity last so overrides cannot clobber floors/estimator role.
+    role,
+    task_origin: "plan",
   };
 }
 

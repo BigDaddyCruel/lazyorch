@@ -5,7 +5,7 @@ import { mintPlanAgent } from "../team/team-manager.js";
 import type { Agent } from "../types/agent.js";
 import { SessionPlanReviewer, SessionPlanWriter } from "./handlers.js";
 import { FakePlanningSession } from "./session-fakes.js";
-import { routePlanningSession } from "./route.js";
+import { planningSignals, routePlanningSession } from "./route.js";
 import { validArtifacts, writeResult } from "./test-fixtures.js";
 
 const FIXED = "2026-03-15T00:00:00.000Z";
@@ -21,6 +21,19 @@ function agent(role: "plan_writer" | "plan_reviewer"): Agent {
         : "agt_reviewerreviewerreviewer",
   });
 }
+
+describe("planningSignals", () => {
+  it("forces role and task_origin after overrides", () => {
+    const s = planningSignals("plan_writer", {
+      role: "worker",
+      task_origin: "dynamic",
+      scope_path_count: 3,
+    });
+    expect(s.role).toBe("plan_writer");
+    expect(s.task_origin).toBe("plan");
+    expect(s.scope_path_count).toBe(3);
+  });
+});
 
 describe("routePlanningSession", () => {
   it("routes plan_writer and plan_reviewer to large tier via floor", () => {
