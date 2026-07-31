@@ -101,6 +101,57 @@ describe("assignReadyTasks", () => {
     ).toBe(1);
   });
 
+  it("passes escalate context on retry (attempt > 1 + last_model_tier)", () => {
+    const locks = new FakeScopeLockManager();
+    let seenEscalate: unknown;
+    const result = assignReadyTasks({
+      tasks: [
+        task("tsk_retry", {
+          attempt: 2,
+          last_model_tier: "small",
+        }),
+      ],
+      sessions: [],
+      phase: "Implementing",
+      limits,
+      locks,
+      now_ms: 1,
+      routing: {
+        routeFn: (input) => {
+          seenEscalate = input.escalate;
+          return fixedRoute;
+        },
+      },
+      nextAgentId: () => "agt_retry",
+    });
+    expect(result.assigned).toHaveLength(1);
+    expect(seenEscalate).toEqual({
+      consecutive_quality_fails: 1,
+      last_model_tier: "small",
+    });
+  });
+
+  it("does not pass escalate on first attempt", () => {
+    const locks = new FakeScopeLockManager();
+    let seenEscalate: unknown = "unset";
+    assignReadyTasks({
+      tasks: [task("tsk_first", { attempt: 1 })],
+      sessions: [],
+      phase: "Implementing",
+      limits,
+      locks,
+      now_ms: 1,
+      routing: {
+        routeFn: (input) => {
+          seenEscalate = input.escalate;
+          return fixedRoute;
+        },
+      },
+      nextAgentId: () => "agt_first",
+    });
+    expect(seenEscalate).toBeUndefined();
+  });
+
   it("reuses idle worker and does not mint past pool max_workers", () => {
     const locks = new FakeScopeLockManager();
     const sessions = Array.from({ length: 4 }, (_, i) => ({
