@@ -84,6 +84,8 @@ describe("assignReadyTasks", () => {
     expect(a.task.complexity_score).toBe(42);
     expect(a.route.adapter_id).toBe("fake-claude");
     expect(a.session_plan.adapter_id).toBe("fake-claude");
+    expect(a.session_plan.reused_idle).toBe(false);
+    expect(a.session_plan.run_handle).toBe("pending_tsk_a");
     expect(locks.isHolder("tsk_a")).toBe(true);
     expect(worktrees.created).toHaveLength(1);
 
@@ -97,6 +99,50 @@ describe("assignReadyTasks", () => {
         tier: "small",
       }),
     ).toBe(1);
+  });
+
+  it("reuses idle worker and does not mint past pool max_workers", () => {
+    const locks = new FakeScopeLockManager();
+    const sessions = Array.from({ length: 4 }, (_, i) => ({
+      run_handle: `idle_${i}`,
+      agent_id: `agt_${i}`,
+      role: "worker" as const,
+      state: "idle" as const,
+      last_activity_ms: i,
+    }));
+    const result = assignReadyTasks({
+      tasks: [task("tsk_new", { scope: ["src/new/**"] })],
+      sessions,
+      phase: "Implementing",
+      limits,
+      locks,
+      now_ms: 1,
+      routing: { routeFn: () => fixedRoute },
+    });
+    expect(result.assigned).toHaveLength(1);
+    expect(result.assigned[0]?.session_plan.reused_idle).toBe(true);
+    expect(result.assigned[0]?.session_plan.run_handle).toBe("idle_0");
+    expect(result.assigned[0]?.task.assignee).toBe("agt_0");
+  });
+
+  it("releases lock if routeFn throws after acquire", () => {
+    const locks = new FakeScopeLockManager();
+    const result = assignReadyTasks({
+      tasks: [task("tsk_boom")],
+      sessions: [],
+      phase: "Implementing",
+      limits,
+      locks,
+      now_ms: 1,
+      routing: {
+        routeFn: () => {
+          throw new Error("route boom");
+        },
+      },
+    });
+    expect(result.assigned).toHaveLength(0);
+    expect(result.skipped[0]?.reason).toBe("worktree_error");
+    expect(locks.isHolder("tsk_boom")).toBe(false);
   });
 
   it("skips assignment when scope lock conflicts; blocks after wait", () => {

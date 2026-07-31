@@ -216,6 +216,17 @@ export function decideScale(input: ScaleDecisionInput): ScaleDecision {
   }
 
   if (desired < active_workers) {
+    // Strict pause freezes pool size in both directions (conflict-storm).
+    if (pause_elasticity) {
+      return {
+        desired,
+        active_workers,
+        action: "none",
+        spawn_count: 0,
+        drain_handles: [],
+        reason: "elasticity_paused",
+      };
+    }
     if (!cooldownElapsed) {
       return {
         desired,

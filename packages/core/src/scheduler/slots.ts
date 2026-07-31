@@ -100,11 +100,38 @@ export interface CanStartSessionInput {
   limits: SlotLimits;
   /** When assigning a worker, also require free_for_workers ≥ 1. */
   free_for_workers?: number;
+  /**
+   * When true, reusing an idle pool worker — pool size does not grow, so
+   * max_workers is not checked against pool_workers (idle already counted).
+   */
+  reuse_idle?: boolean;
+}
+
+/**
+ * Whether a worker assignment may proceed (mint or reuse idle).
+ * - Always needs a free concurrent slot when the worker will become starting|running
+ * - Minting requires `pool_workers < max_workers`
+ * - Reusing idle only needs free slots (pool already includes that worker)
+ */
+export function canStartWorkerAssignment(input: {
+  usage: SlotUsage;
+  limits: SlotLimits;
+  free_for_workers: number;
+  reuse_idle: boolean;
+}): boolean {
+  if (input.usage.slots_used >= input.limits.max_concurrent_agents) {
+    return false;
+  }
+  if (input.free_for_workers < 1) return false;
+  if (!input.reuse_idle && input.usage.pool_workers >= input.limits.max_workers) {
+    return false;
+  }
+  return true;
 }
 
 /**
  * Whether a new session of `role` may start under hard caps.
- * Lead is capped at 1; workers use max_workers + free_for_workers;
+ * Lead is capped at 1; workers use max_workers (pool) + free_for_workers;
  * reviewers/qa use their max; all roles share max_concurrent_agents.
  */
 export function canStartSession(input: CanStartSessionInput): boolean {
@@ -118,7 +145,12 @@ export function canStartSession(input: CanStartSessionInput): boolean {
     case "lead":
       return usage.active_lead < 1;
     case "worker": {
-      if (usage.active_workers >= limits.max_workers) return false;
+      // max_workers caps the elastic pool (incl. idle), not only slot-holders
+      if (input.reuse_idle) {
+        // Reuse does not grow the pool
+      } else if (usage.pool_workers >= limits.max_workers) {
+        return false;
+      }
       const free = input.free_for_workers;
       if (free !== undefined && free < 1) return false;
       return true;

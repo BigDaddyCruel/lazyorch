@@ -232,6 +232,7 @@ export {
   computeSlotUsage,
   freeForWorkers,
   canStartSession,
+  canStartWorkerAssignment,
   freeForWorkersFromSessions,
   slotLimitsFromConfig,
   // elasticity
@@ -250,9 +251,13 @@ export {
   assignReadyTasks,
   assignReadyTasksAsync,
   releaseTaskScopeLocks,
+  pickIdleWorker,
+  maxAssignTowardDesired,
   // metrics + tick
   SchedulerMetrics,
   planElasticity,
+  clampSpawnAfterAssign,
+  applyAssignToSessions,
   schedulerTick,
   schedulerTickAsync,
   defaultSchedulerConfig,

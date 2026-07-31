@@ -146,7 +146,10 @@ export interface HostPressure {
 export interface DesiredWorkersInput {
   /** Count of ready tasks not blocked by scope lock wait. */
   ready_count: number;
-  /** Worker sessions in starting|running (and assigned-but-starting). */
+  /**
+   * Worker pool size for elasticity compare (starting|running|idle,
+   * excluding draining). Passed as `usage.pool_workers` from planElasticity.
+   */
   active_workers: number;
   elasticity: Pick<
     ElasticityConfig,
@@ -192,6 +195,10 @@ export interface AssignTaskResult {
     model: string;
     model_tier: RouteResult["tier"];
     session_kind: RouteResult["session_kind"];
+    /** Existing or pending run_handle (idle reuse keeps the old handle). */
+    run_handle: string;
+    /** True when an idle pool worker was claimed instead of minting. */
+    reused_idle: boolean;
     effort?: RouteResult["effort"];
     complexity_score?: number;
   };

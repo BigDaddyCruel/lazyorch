@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RouteResult } from "../models/types.js";
 import type { Task } from "../types/task.js";
+import { maxAssignTowardDesired } from "./assign.js";
 import { FakeScopeLockManager, FakeWorktreePort } from "./fakes.js";
 import { SchedulerMetrics } from "./metrics.js";
 import {
@@ -44,6 +45,29 @@ const route: RouteResult = {
   pin_locked: false,
 };
 
+describe("maxAssignTowardDesired", () => {
+  it("caps at desired - active_workers", () => {
+    expect(
+      maxAssignTowardDesired({
+        free_for_workers: 7,
+        desired: 1,
+        active_workers: 0,
+      }),
+    ).toBe(1);
+  });
+
+  it("returns 0 when budget_exhausted", () => {
+    expect(
+      maxAssignTowardDesired({
+        free_for_workers: 7,
+        desired: 4,
+        active_workers: 0,
+        budget_exhausted: true,
+      }),
+    ).toBe(0);
+  });
+});
+
 describe("planElasticity", () => {
   it("computes desired from ready count and decides spawn", () => {
     const cfg = defaultSchedulerConfig();
@@ -66,7 +90,7 @@ describe("planElasticity", () => {
 });
 
 describe("schedulerTick", () => {
-  it("assigns ready tasks with router metrics and updates runtime", () => {
+  it("assigns at most desired workers (ready=2, ratio=2 → desired=1)", () => {
     const locks = new FakeScopeLockManager();
     const worktrees = new FakeWorktreePort();
     const metrics = new SchedulerMetrics();
@@ -85,41 +109,15 @@ describe("schedulerTick", () => {
     });
 
     expect(result.desired_workers).toBe(1); // ceil(2/2)=1
-    expect(result.assign.assigned.length).toBeGreaterThanOrEqual(1);
-    expect(result.runtime.sessions.some((s) => s.state === "starting")).toBe(
-      true,
+    expect(result.assign.assigned).toHaveLength(1);
+    expect(result.runtime.sessions.filter((s) => s.state === "starting")).toHaveLength(
+      1,
     );
     expect(metrics.gauge("scheduler.desired_workers")).toBe(1);
-    expect(metrics.gauge("scheduler.slots_used")).toBeGreaterThanOrEqual(1);
-    expect(metrics.counter("router.tier_selected")).toBeGreaterThanOrEqual(1);
-    expect(metrics.tierCount("nano")).toBeGreaterThanOrEqual(1);
+    expect(metrics.counter("router.tier_selected")).toBe(1);
   });
 
-  it("records scale_events on spawn decision", () => {
-    const locks = new FakeScopeLockManager();
-    const metrics = new SchedulerMetrics();
-    const cfg = defaultSchedulerConfig();
-    // Many ready tasks, no sessions → scale_up
-    const result = schedulerTick({
-      tasks: Array.from({ length: 8 }, (_, i) => task(`t${i}`)),
-      phase: "Implementing",
-      runtime: emptySchedulerRuntime(),
-      config: cfg,
-      locks,
-      metrics,
-      now_ms: 10_000,
-      routing: { routeFn: () => route },
-      // Don't create worktrees for simplicity — empty scope skips worktree need
-      // but tasks have scopes; use shared mode without worktree port
-    });
-    // With worktree port omitted, worktree mode still assigns without paths
-    expect(result.scale.action).toBe("spawn");
-    expect(metrics.counter("scheduler.scale_events")).toBe(1);
-    expect(result.runtime.scale_events).toBe(1);
-    expect(result.runtime.last_scale_ms).toBe(10_000);
-  });
-
-  it("budget_exhausted sets desired 0 and does not spawn", () => {
+  it("budget_exhausted assigns zero (drain only)", () => {
     const locks = new FakeScopeLockManager();
     const cfg = defaultSchedulerConfig();
     const result = schedulerTick({
@@ -133,13 +131,113 @@ describe("schedulerTick", () => {
       routing: { routeFn: () => route },
     });
     expect(result.desired_workers).toBe(0);
-    expect(result.scale.action).toBe("none");
+    expect(result.assign.assigned).toHaveLength(0);
+    expect(result.scale.spawn_count).toBe(0);
+  });
+
+  it("does not double-claim free slots between assign and spawn", () => {
+    const locks = new FakeScopeLockManager();
+    const cfg = defaultSchedulerConfig();
+    // desired=2 (4 ready / 2), free=7, scale_burst=1
+    // After assign of 2, pool=2, desired=2 → spawn_count must be 0
+    const result = schedulerTick({
+      tasks: [task("a"), task("b"), task("c"), task("d")],
+      phase: "Implementing",
+      runtime: emptySchedulerRuntime(),
+      config: cfg,
+      locks,
+      now_ms: 10_000,
+      routing: { routeFn: () => route },
+    });
+    expect(result.desired_workers).toBe(2);
+    expect(result.assign.assigned).toHaveLength(2);
+    // Assign filled desired — no additional idle pre-warm
+    expect(result.scale.spawn_count).toBe(0);
+    expect(result.scale.action).not.toBe("spawn");
+    const pool = result.runtime.sessions.filter(
+      (s) => s.role === "worker" && s.state !== "draining",
+    ).length;
+    expect(pool).toBe(2);
+  });
+
+  it("reuses idle pool workers instead of minting past max_workers", () => {
+    const locks = new FakeScopeLockManager();
+    const cfg = defaultSchedulerConfig();
+    const idleSessions: SchedulerSession[] = Array.from(
+      { length: 4 },
+      (_, i) => ({
+        run_handle: `idle_${i}`,
+        agent_id: `agt_idle_${i}`,
+        role: "worker" as const,
+        state: "idle" as const,
+        worktree_clean: true,
+        last_activity_ms: i,
+      }),
+    );
+    const runtime = emptySchedulerRuntime();
+    runtime.sessions = idleSessions;
+
+    // 1 ready → desired=1; must reuse idle_0, not mint 5th
+    const result = schedulerTick({
+      tasks: [task("only")],
+      phase: "Implementing",
+      runtime,
+      config: cfg,
+      locks,
+      now_ms: 1000,
+      routing: { routeFn: () => route },
+    });
+    expect(result.assign.assigned).toHaveLength(1);
+    expect(result.assign.assigned[0]?.session_plan.reused_idle).toBe(true);
+    expect(result.assign.assigned[0]?.session_plan.run_handle).toBe("idle_0");
+    expect(result.assign.assigned[0]?.session_plan.agent_id).toBe("agt_idle_0");
+    // Pool still 4 — no 5th member
+    const pool = result.runtime.sessions.filter(
+      (s) => s.role === "worker" && s.state !== "draining",
+    );
+    expect(pool).toHaveLength(4);
+    const claimed = pool.find((s) => s.run_handle === "idle_0");
+    expect(claimed?.state).toBe("starting");
+    expect(claimed?.task_id).toBe("only");
+  });
+
+  it("4 idle at max_workers + ready does not mint a 5th", () => {
+    const locks = new FakeScopeLockManager();
+    const cfg = defaultSchedulerConfig();
+    cfg.elasticity.max_workers = 4;
+    // Force high desired so cap is max_workers not desired
+    cfg.elasticity.scale_up_ready_ratio = 1;
+    const runtime = emptySchedulerRuntime();
+    runtime.sessions = Array.from({ length: 4 }, (_, i) => ({
+      run_handle: `i${i}`,
+      agent_id: `a${i}`,
+      role: "worker" as const,
+      state: "idle" as const,
+      last_activity_ms: 0,
+    }));
+
+    const result = schedulerTick({
+      tasks: [task("r1"), task("r2"), task("r3"), task("r4"), task("r5")],
+      phase: "Implementing",
+      runtime,
+      config: cfg,
+      locks,
+      now_ms: 1,
+      routing: { routeFn: () => route },
+    });
+    // desired = min(5, 4) = 4; active busy=0 → max_assign=4; all reuses
+    expect(result.assign.assigned).toHaveLength(4);
+    expect(
+      result.assign.assigned.every((a) => a.session_plan.reused_idle),
+    ).toBe(true);
+    expect(
+      result.runtime.sessions.filter((s) => s.role === "worker").length,
+    ).toBe(4);
   });
 
   it("marks idle clean workers draining on scale-down", () => {
     const locks = new FakeScopeLockManager();
     const cfg = defaultSchedulerConfig();
-    // cooldown 0 for test
     cfg.elasticity.cooldown_seconds = 0;
     cfg.elasticity.scale_down_idle_minutes = 0;
 
@@ -170,5 +268,36 @@ describe("schedulerTick", () => {
     expect(
       result.runtime.sessions.find((s) => s.run_handle === "idle_w")?.state,
     ).toBe("draining");
+  });
+
+  it("records scale_events on drain", () => {
+    const locks = new FakeScopeLockManager();
+    const metrics = new SchedulerMetrics();
+    const cfg = defaultSchedulerConfig();
+    cfg.elasticity.cooldown_seconds = 0;
+    cfg.elasticity.scale_down_idle_minutes = 0;
+    const runtime = emptySchedulerRuntime();
+    runtime.sessions = [
+      {
+        run_handle: "idle_w",
+        agent_id: "agt",
+        role: "worker",
+        state: "idle",
+        worktree_clean: true,
+        last_activity_ms: 0,
+      },
+    ];
+    const result = schedulerTick({
+      tasks: [],
+      phase: "Implementing",
+      runtime,
+      config: cfg,
+      locks,
+      metrics,
+      now_ms: 10_000,
+      routing: { routeFn: () => route },
+    });
+    expect(result.scale.action).toBe("drain");
+    expect(metrics.counter("scheduler.scale_events")).toBe(1);
   });
 });

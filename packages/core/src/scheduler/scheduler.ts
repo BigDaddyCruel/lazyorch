@@ -1,8 +1,15 @@
 /**
  * Scheduler tick: elasticity + assign ready tasks (+ router at assign).
  *
- * Orchestrates pure helpers; I/O stays behind ports (locks, worktrees).
- * Session process start is the caller's job (adapters session runner).
+ * Caller contract (normative, Issue 4):
+ * 1. Apply `assign.assigned` session plans first (mint or idle-reuse).
+ * 2. `scale.spawn_count` is **only** additional idle pre-warm to reach
+ *    `desired` after assign (e.g. min_workers floor with no ready work).
+ *    It is recomputed post-assign so free slots / pool are not double-claimed.
+ * 3. Apply `scale.drain_handles` to mark idle workers draining.
+ *
+ * Assign respects `desired` and `budget_exhausted` via max_assign.
+ * Role-template matching deferred to PR-13 team manager.
  */
 
 import type { ElasticityConfig, SchedulingConfig } from "@lazyorch/shared";
@@ -11,6 +18,7 @@ import type { Task } from "../types/task.js";
 import {
   assignReadyTasks,
   assignReadyTasksAsync,
+  maxAssignTowardDesired,
   type AssignReadyOptions,
   type AssignRoutingOptions,
 } from "./assign.js";
@@ -50,9 +58,10 @@ export interface SchedulerTickInput {
   now_ms?: number;
   host?: HostPressure;
   budget_exhausted?: boolean;
+  /** Freeze pool size both up and down (conflict storm). */
   pause_elasticity?: boolean;
   skip_scope_lock_task_ids?: ReadonlySet<string>;
-  /** Override max assignments this tick. */
+  /** Override max assignments this tick (bypasses desired cap). */
   max_assign?: number;
 }
 
@@ -105,7 +114,6 @@ export function planElasticity(input: {
     lead_reservation_needed: phaseNeedsLeadReservation(input.phase),
   });
 
-  // Elasticity compares desired against pool size (includes idle workers).
   const desiredInput: Parameters<typeof computeDesiredWorkers>[0] = {
     ready_count: countReady(input.tasks),
     active_workers: usage.pool_workers,
@@ -140,6 +148,125 @@ export function planElasticity(input: {
   const scale = decideScale(scaleInput);
 
   return { desired, scale, free_for_workers: free };
+}
+
+/**
+ * After assign, recompute idle pre-warm spawn so it does not double-claim
+ * free slots already consumed by assignment (Issue 4).
+ *
+ * Assign is the primary path for workers with tasks. `spawn_count` only
+ * fills remaining desired gap (e.g. min_workers) with task-less idle workers.
+ */
+export function clampSpawnAfterAssign(input: {
+  desired: number;
+  /** Sessions after assign + before optional pre-warm spawn. */
+  sessions_after_assign: readonly SchedulerSession[];
+  elasticity: Pick<
+    ElasticityConfig,
+    "scale_burst" | "max_workers" | "cooldown_seconds"
+  >;
+  free_for_workers_after: number;
+  now_ms: number;
+  last_scale_ms: number;
+  pause_elasticity?: boolean;
+  /** Pre-assign scale decision (for drain handles / cooldown reason). */
+  pre_scale: ScaleDecision;
+}): ScaleDecision {
+  const usage = computeSlotUsage(input.sessions_after_assign);
+  const pool = usage.pool_workers;
+
+  // Preserve drain decision from pre-assign plan (idle clean workers).
+  if (input.pre_scale.action === "drain") {
+    return input.pre_scale;
+  }
+
+  if (input.pause_elasticity) {
+    return {
+      desired: input.desired,
+      active_workers: pool,
+      action: "none",
+      spawn_count: 0,
+      drain_handles: [],
+      reason: "elasticity_paused",
+    };
+  }
+
+  if (input.desired <= pool) {
+    return {
+      desired: input.desired,
+      active_workers: pool,
+      action: "none",
+      spawn_count: 0,
+      drain_handles: [],
+      reason: input.desired === pool ? "at_desired" : "assign_filled_desired",
+    };
+  }
+
+  const cooldownMs = input.elasticity.cooldown_seconds * 1000;
+  const cooldownElapsed =
+    input.last_scale_ms === 0 ||
+    input.now_ms - input.last_scale_ms >= cooldownMs;
+  if (!cooldownElapsed) {
+    return {
+      desired: input.desired,
+      active_workers: pool,
+      action: "none",
+      spawn_count: 0,
+      drain_handles: [],
+      reason: "cooldown",
+    };
+  }
+
+  if (input.free_for_workers_after < 1) {
+    return {
+      desired: input.desired,
+      active_workers: pool,
+      action: "none",
+      spawn_count: 0,
+      drain_handles: [],
+      reason: "no_free_slots",
+    };
+  }
+
+  if (pool >= input.elasticity.max_workers) {
+    return {
+      desired: input.desired,
+      active_workers: pool,
+      action: "none",
+      spawn_count: 0,
+      drain_handles: [],
+      reason: "max_workers",
+    };
+  }
+
+  const gap = input.desired - pool;
+  const room = input.elasticity.max_workers - pool;
+  const spawn_count = Math.min(
+    gap,
+    input.elasticity.scale_burst,
+    room,
+    input.free_for_workers_after,
+  );
+
+  if (spawn_count <= 0) {
+    return {
+      desired: input.desired,
+      active_workers: pool,
+      action: "none",
+      spawn_count: 0,
+      drain_handles: [],
+      reason: "no_spawn_capacity",
+    };
+  }
+
+  return {
+    desired: input.desired,
+    active_workers: pool,
+    action: "spawn",
+    spawn_count,
+    drain_handles: [],
+    reason: "scale_up",
+  };
 }
 
 function applyDrain(
@@ -186,36 +313,61 @@ function buildAssignOptions(
   return opts;
 }
 
+/**
+ * Merge assign results into session list: reuse updates idle → starting;
+ * mint appends pending_* workers.
+ */
+export function applyAssignToSessions(
+  sessions: readonly SchedulerSession[],
+  assign: AssignBatchResult,
+  now: number,
+): SchedulerSession[] {
+  let next = sessions.map((s) => ({ ...s }));
+  for (const a of assign.assigned) {
+    const plan = a.session_plan;
+    if (plan.reused_idle) {
+      const idx = next.findIndex((s) => s.run_handle === plan.run_handle);
+      if (idx >= 0) {
+        next[idx] = {
+          ...next[idx]!,
+          state: "starting",
+          task_id: a.task.id,
+          adapter_id: plan.adapter_id,
+          model: plan.model,
+          model_tier: plan.model_tier,
+          last_activity_ms: now,
+        };
+      }
+    } else {
+      next = [
+        ...next,
+        {
+          run_handle: plan.run_handle,
+          agent_id: plan.agent_id,
+          role: "worker",
+          task_id: a.task.id,
+          state: "starting",
+          adapter_id: plan.adapter_id,
+          model: plan.model,
+          model_tier: plan.model_tier,
+          last_activity_ms: now,
+        },
+      ];
+    }
+  }
+  return next;
+}
+
 function finalizeRuntime(
   input: SchedulerTickInput,
   assign: AssignBatchResult,
   scale: ScaleDecision,
   now: number,
   agentSeq: number,
+  sessionsAfterAssign: SchedulerSession[],
 ): SchedulerRuntimeState {
-  let sessions = applyDrain(
-    input.runtime.sessions,
-    scale.drain_handles,
-    now,
-  );
-
-  // Reflect assigned sessions as starting workers (caller starts real processes)
-  for (const a of assign.assigned) {
-    sessions = [
-      ...sessions,
-      {
-        run_handle: `pending_${a.task.id}`,
-        agent_id: a.session_plan.agent_id,
-        role: "worker",
-        task_id: a.task.id,
-        state: "starting",
-        adapter_id: a.session_plan.adapter_id,
-        model: a.session_plan.model,
-        model_tier: a.session_plan.model_tier,
-        last_activity_ms: now,
-      },
-    ];
-  }
+  // Drain after assign (never drain workers just assigned)
+  const sessions = applyDrain(sessionsAfterAssign, scale.drain_handles, now);
 
   const scaled = scale.action === "spawn" || scale.action === "drain";
 
@@ -237,11 +389,69 @@ function updateMetrics(
   if (!metrics) return;
   metrics.setGauges({
     "scheduler.desired_workers": desired,
-    // Expose pool size (incl. idle) as active_workers gauge per design metric name
     "scheduler.active_workers": usage.pool_workers,
     "scheduler.slots_used": usage.slots_used,
   });
   metrics.recordScaleEvent(scale.action);
+}
+
+function runTickCore(
+  input: SchedulerTickInput,
+  assign: AssignBatchResult,
+  now: number,
+  agentSeq: number,
+  desired: number,
+  preScale: ScaleDecision,
+  freeBefore: number,
+): SchedulerTickResult {
+  const sessionsAfterAssign = applyAssignToSessions(
+    input.runtime.sessions,
+    assign,
+    now,
+  );
+
+  const usageAfter = computeSlotUsage(sessionsAfterAssign);
+  const freeAfter = freeForWorkers({
+    max_concurrent_agents: input.config.scheduling.max_concurrent_agents,
+    slots_used: usageAfter.slots_used,
+    reserve_slots_lead: input.config.reserve_slots.lead,
+    lead_session_active: usageAfter.active_lead > 0,
+    lead_reservation_needed: phaseNeedsLeadReservation(input.phase),
+  });
+
+  const clampInput: Parameters<typeof clampSpawnAfterAssign>[0] = {
+    desired,
+    sessions_after_assign: sessionsAfterAssign,
+    elasticity: input.config.elasticity,
+    free_for_workers_after: freeAfter,
+    now_ms: now,
+    last_scale_ms: input.runtime.last_scale_ms,
+    pre_scale: preScale,
+  };
+  if (input.pause_elasticity !== undefined) {
+    clampInput.pause_elasticity = input.pause_elasticity;
+  }
+  const scale = clampSpawnAfterAssign(clampInput);
+
+  const runtime = finalizeRuntime(
+    input,
+    assign,
+    scale,
+    now,
+    agentSeq,
+    sessionsAfterAssign,
+  );
+  const usage = computeSlotUsage(runtime.sessions);
+  updateMetrics(input.metrics, desired, usage, scale);
+
+  return {
+    desired_workers: desired,
+    scale,
+    assign,
+    runtime,
+    usage,
+    free_for_workers: freeBefore,
+  };
 }
 
 /**
@@ -269,35 +479,36 @@ export function schedulerTick(input: SchedulerTickInput): SchedulerTickResult {
   if (input.pause_elasticity !== undefined) {
     planInput.pause_elasticity = input.pause_elasticity;
   }
-  const { desired, scale, free_for_workers } = planElasticity(planInput);
+  const { desired, scale: preScale, free_for_workers } =
+    planElasticity(planInput);
 
+  const preUsage = computeSlotUsage(input.runtime.sessions);
   const agentSeq = { value: input.runtime.agent_seq };
   const assignOpts = buildAssignOptions(input, limits, now, agentSeq);
-  // Cap assigns by free slots (elasticity spawn_count is advisory pool sizing;
-  // assignment claims ready work immediately when slots are free).
+
+  // Issue 1: cap assign by desired / budget (not free slots alone)
   if (input.max_assign === undefined) {
-    assignOpts.max_assign = free_for_workers;
+    const capInput: Parameters<typeof maxAssignTowardDesired>[0] = {
+      free_for_workers,
+      desired,
+      active_workers: preUsage.active_workers,
+    };
+    if (input.budget_exhausted !== undefined) {
+      capInput.budget_exhausted = input.budget_exhausted;
+    }
+    assignOpts.max_assign = maxAssignTowardDesired(capInput);
   }
 
   const assign = assignReadyTasks(assignOpts);
-  const runtime = finalizeRuntime(
+  return runTickCore(
     input,
     assign,
-    scale,
     now,
     agentSeq.value,
-  );
-  const usage = computeSlotUsage(runtime.sessions);
-  updateMetrics(input.metrics, desired, usage, scale);
-
-  return {
-    desired_workers: desired,
-    scale,
-    assign,
-    runtime,
-    usage,
+    desired,
+    preScale,
     free_for_workers,
-  };
+  );
 }
 
 /**
@@ -326,33 +537,35 @@ export async function schedulerTickAsync(
   if (input.pause_elasticity !== undefined) {
     planInput.pause_elasticity = input.pause_elasticity;
   }
-  const { desired, scale, free_for_workers } = planElasticity(planInput);
+  const { desired, scale: preScale, free_for_workers } =
+    planElasticity(planInput);
 
+  const preUsage = computeSlotUsage(input.runtime.sessions);
   const agentSeq = { value: input.runtime.agent_seq };
   const assignOpts = buildAssignOptions(input, limits, now, agentSeq);
+
   if (input.max_assign === undefined) {
-    assignOpts.max_assign = free_for_workers;
+    const capInput: Parameters<typeof maxAssignTowardDesired>[0] = {
+      free_for_workers,
+      desired,
+      active_workers: preUsage.active_workers,
+    };
+    if (input.budget_exhausted !== undefined) {
+      capInput.budget_exhausted = input.budget_exhausted;
+    }
+    assignOpts.max_assign = maxAssignTowardDesired(capInput);
   }
 
   const assign = await assignReadyTasksAsync(assignOpts);
-  const runtime = finalizeRuntime(
+  return runTickCore(
     input,
     assign,
-    scale,
     now,
     agentSeq.value,
-  );
-  const usage = computeSlotUsage(runtime.sessions);
-  updateMetrics(input.metrics, desired, usage, scale);
-
-  return {
-    desired_workers: desired,
-    scale,
-    assign,
-    runtime,
-    usage,
+    desired,
+    preScale,
     free_for_workers,
-  };
+  );
 }
 
 /** Default scheduler config slices matching design defaults. */

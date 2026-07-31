@@ -9,6 +9,7 @@ export {
   computeSlotUsage,
   freeForWorkers,
   canStartSession,
+  canStartWorkerAssignment,
   freeForWorkersFromSessions,
   slotLimitsFromConfig,
 } from "./slots.js";
@@ -33,6 +34,8 @@ export {
   assignReadyTasks,
   assignReadyTasksAsync,
   releaseTaskScopeLocks,
+  pickIdleWorker,
+  maxAssignTowardDesired,
   type AssignReadyOptions,
   type AssignRoutingOptions,
 } from "./assign.js";
@@ -41,6 +44,8 @@ export { SchedulerMetrics } from "./metrics.js";
 
 export {
   planElasticity,
+  clampSpawnAfterAssign,
+  applyAssignToSessions,
   schedulerTick,
   schedulerTickAsync,
   defaultSchedulerConfig,

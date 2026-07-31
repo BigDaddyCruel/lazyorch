@@ -202,6 +202,26 @@ describe("decideScale", () => {
     expect(d.action).toBe("none");
     expect(d.reason).toBe("elasticity_paused");
   });
+
+  it("pauses elasticity on scale-down when requested (strict freeze)", () => {
+    const idle: SchedulerSession = {
+      run_handle: "idle1",
+      agent_id: "agt_1",
+      role: "worker",
+      state: "idle",
+      worktree_clean: true,
+      last_activity_ms: 0,
+    };
+    const d = decideScale({
+      ...base,
+      desired: 0,
+      active_workers: 1,
+      idle_drain_candidates: [idle],
+      pause_elasticity: true,
+    });
+    expect(d.action).toBe("none");
+    expect(d.reason).toBe("elasticity_paused");
+  });
 });
 
 describe("idleDrainCandidates", () => {

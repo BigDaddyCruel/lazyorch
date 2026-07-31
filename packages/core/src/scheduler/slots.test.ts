@@ -139,13 +139,14 @@ describe("canStartSession", () => {
     ).toBe(false);
   });
 
-  it("caps workers at max_workers even when slots free", () => {
+  it("caps workers at max_workers using pool (incl. idle)", () => {
     const usage = computeSlotUsage(
       Array.from({ length: 4 }, (_, i) =>
         sess({ run_handle: `w${i}`, role: "worker", state: "running" }),
       ),
     );
     expect(usage.active_workers).toBe(4);
+    expect(usage.pool_workers).toBe(4);
     expect(
       canStartSession({
         role: "worker",
@@ -154,6 +155,35 @@ describe("canStartSession", () => {
         free_for_workers: 3,
       }),
     ).toBe(false);
+  });
+
+  it("4 idle workers at max_workers blocks mint (pool cap)", () => {
+    const usage = computeSlotUsage(
+      Array.from({ length: 4 }, (_, i) =>
+        sess({ run_handle: `idle${i}`, role: "worker", state: "idle" }),
+      ),
+    );
+    expect(usage.active_workers).toBe(0);
+    expect(usage.pool_workers).toBe(4);
+    expect(
+      canStartSession({
+        role: "worker",
+        usage,
+        limits,
+        free_for_workers: 7,
+        reuse_idle: false,
+      }),
+    ).toBe(false);
+    // Reuse idle still allowed
+    expect(
+      canStartSession({
+        role: "worker",
+        usage,
+        limits,
+        free_for_workers: 7,
+        reuse_idle: true,
+      }),
+    ).toBe(true);
   });
 
   it("allows worker when free_for_workers ≥ 1 and under max_workers", () => {
