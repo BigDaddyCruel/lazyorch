@@ -25,6 +25,7 @@
   "dependencies": {
     "@lazyorch/adapters": "workspace:*",
     "@lazyorch/core": "workspace:*",
+    "@lazyorch/daemon": "workspace:*",
     "@lazyorch/shared": "workspace:*"
   },
   "devDependencies": {

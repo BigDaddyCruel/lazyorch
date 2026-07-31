@@ -56,6 +56,9 @@ importers:
       '@lazyorch/core':
         specifier: workspace:*
         version: link:../core
+      '@lazyorch/daemon':
+        specifier: workspace:*
+        version: link:../daemon
       '@lazyorch/shared':
         specifier: workspace:*
         version: link:../shared
