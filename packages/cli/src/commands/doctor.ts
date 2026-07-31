@@ -1,5 +1,6 @@
-import { access, constants, readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { AdapterRegistry } from "@lazyorch/adapters";
 import {
   ConfigValidationError,
   parseConfigYaml,
@@ -33,8 +34,6 @@ export interface DoctorResult {
   config: LazyorchConfig | null;
 }
 
-const BUILTIN_ADAPTERS = ["claude", "codex", "agy", "grok"] as const;
-
 async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -42,48 +41,6 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-/**
- * Best-effort PATH binary check (no spawn). Missing binaries are warnings only.
- */
-async function binaryResolvable(name: string): Promise<boolean> {
-  if (!name) return false;
-
-  // Absolute or relative path — check filesystem directly.
-  if (name.includes("/") || name.includes("\\") || name.includes(":")) {
-    try {
-      await access(name, constants.F_OK);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  const pathEnv = process.env.PATH ?? process.env.Path ?? "";
-  const sep = process.platform === "win32" ? ";" : ":";
-  const exts =
-    process.platform === "win32"
-      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
-      : [""];
-
-  for (const dir of pathEnv.split(sep)) {
-    if (!dir) continue;
-    const base = join(dir, name);
-    const candidates =
-      process.platform === "win32"
-        ? [base, ...exts.map((ext) => base + ext)]
-        : [base];
-    for (const p of candidates) {
-      try {
-        await access(p, constants.F_OK);
-        return true;
-      } catch {
-        // try next
-      }
-    }
-  }
-  return false;
 }
 
 function isCi(options: DoctorOptions): boolean {
@@ -290,92 +247,64 @@ export async function runDoctor(
   };
 }
 
+/**
+ * Adapter checks via AdapterRegistry (PATH discovery + capability matrix).
+ * Missing / unbound coding adapters are warnings only (doctor stays green).
+ */
 async function checkAdapters(
   config: LazyorchConfig,
   findings: DoctorFinding[],
 ): Promise<void> {
-  for (const id of BUILTIN_ADAPTERS) {
-    const entry = config.adapters[id];
-    if (!entry.enabled) {
+  const registry = await AdapterRegistry.fromConfig(config.adapters);
+  // Resolve-only probe: avoid spawning unknown CLIs during doctor.
+  const matrix = await registry.healthMatrix({ skip_version_probe: true });
+
+  for (const row of matrix.adapters) {
+    if (!row.enabled) {
       findings.push({
         level: "ok",
-        code: `adapter_${id}`,
-        message: `adapter ${id}: disabled`,
+        code: `adapter_${row.id}`,
+        message: `adapter ${row.id}: disabled`,
       });
       continue;
     }
 
-    const candidates: string[] = [];
-    if (entry.binary) candidates.push(entry.binary);
-    if ("candidates" in entry && Array.isArray(entry.candidates)) {
-      candidates.push(...entry.candidates);
-    }
-    if (candidates.length === 0) candidates.push(id);
-
-    let found: string | null = null;
-    for (const c of candidates) {
-      if (await binaryResolvable(c)) {
-        found = c;
-        break;
-      }
-    }
-
-    if (found) {
+    if (row.id === "shell") {
       findings.push({
         level: "ok",
-        code: `adapter_${id}`,
-        message: `adapter ${id}: found (${found})`,
+        code: "adapter_shell",
+        message: "adapter shell: enabled (no external binary)",
+      });
+      continue;
+    }
+
+    if (row.status === "ok") {
+      findings.push({
+        level: "ok",
+        code: `adapter_${row.id}`,
+        message: `adapter ${row.id}: found (${row.binary_path ?? row.binary ?? "?"})`,
+      });
+    } else if (row.status === "unbound" || row.status === "missing") {
+      findings.push({
+        level: "warn",
+        code: `adapter_${row.id}_missing`,
+        message: `adapter ${row.id}: binary not found on PATH; ok until a run needs it`,
       });
     } else {
       findings.push({
         level: "warn",
-        code: `adapter_${id}_missing`,
-        message: `adapter ${id}: binary not found on PATH (candidates: ${candidates.join(", ")}); ok until a run needs it`,
+        code: `adapter_${row.id}`,
+        message: row.message,
       });
     }
   }
 
-  if (config.adapters.shell.enabled) {
+  if (!matrix.has_healthy_coding_adapter) {
     findings.push({
-      level: "ok",
-      code: "adapter_shell",
-      message: "adapter shell: enabled (no external binary)",
+      level: "warn",
+      code: "no_coding_adapter",
+      message:
+        "no healthy non-shell coding adapter bound; install claude/codex/agy/grok or register a CLI before LLM runs",
     });
-  }
-
-  for (const reg of config.adapters.registry) {
-    if (!reg.enabled) {
-      findings.push({
-        level: "ok",
-        code: `adapter_${reg.id}`,
-        message: `adapter ${reg.id}: disabled (registry)`,
-      });
-      continue;
-    }
-    const candidates = [
-      ...(reg.binary ? [reg.binary] : []),
-      ...(reg.candidates ?? []),
-      reg.id,
-    ];
-    let found: string | null = null;
-    for (const c of candidates) {
-      if (await binaryResolvable(c)) {
-        found = c;
-        break;
-      }
-    }
-    if (found) {
-      findings.push({
-        level: "ok",
-        code: `adapter_${reg.id}`,
-        message: `adapter ${reg.id}: found (${found})`,
-      });
-    } else {
-      findings.push({
-        level: "warn",
-        code: `adapter_${reg.id}_missing`,
-        message: `adapter ${reg.id}: binary not found (registry); ok until a run needs it`,
-      });
-    }
   }
 }

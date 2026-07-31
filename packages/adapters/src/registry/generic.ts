@@ -1,0 +1,261 @@
+/**
+ * Thin generic CLI adapter — start_template → argv spawn.
+ * Used for user-registered tools (aider, opencode, …) and as a thin
+ * stand-in for builtins until PR-09 deepens vendor-specific flags/usage.
+ *
+ * Does not own timeout/stall/cancel process-tree kill (session runner).
+ */
+
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { substituteStartTemplate } from "../runner/materialize.js";
+import { scrubEnv } from "../scrub.js";
+import type {
+  AgentAdapter,
+  AgentSession,
+  DoctorResult,
+  RunningAgent,
+  SessionResult,
+} from "../types.js";
+import { probeAdapter, type ExecImpl } from "./probe.js";
+import type { AdapterRegistration } from "./types.js";
+import type { SpawnImpl, SpawnedProcess } from "../shell/adapter.js";
+import { defaultSpawnImpl } from "../shell/adapter.js";
+
+export class GenericAdapterError extends Error {
+  readonly code:
+    | "unbound"
+    | "missing_template"
+    | "missing_session_dir"
+    | "spawn"
+    | "empty_argv";
+
+  constructor(code: GenericAdapterError["code"], message: string) {
+    super(message);
+    this.name = "GenericAdapterError";
+    this.code = code;
+  }
+}
+
+export interface GenericAdapterOptions {
+  registration: AdapterRegistration;
+  spawnImpl?: SpawnImpl;
+  execImpl?: ExecImpl;
+}
+
+interface LiveEntry {
+  process: SpawnedProcess;
+  run_handle: string;
+}
+
+/**
+ * Split a substituted start template into argv.
+ * Simple whitespace split; supports double-quoted segments.
+ */
+export function splitTemplateArgv(command: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(command)) !== null) {
+    const part = m[1] ?? m[2] ?? m[3] ?? "";
+    if (part.length > 0 || m[1] !== undefined || m[2] !== undefined) {
+      out.push(part);
+    }
+  }
+  return out;
+}
+
+export class GenericCliAdapter implements AgentAdapter {
+  readonly id: string;
+  private readonly reg: AdapterRegistration;
+  private readonly spawnImpl: SpawnImpl;
+  private readonly execImpl: ExecImpl | undefined;
+  private readonly live = new Map<string, LiveEntry>();
+
+  constructor(options: GenericAdapterOptions) {
+    this.reg = options.registration;
+    this.id = options.registration.id;
+    this.spawnImpl = options.spawnImpl ?? defaultSpawnImpl;
+    this.execImpl = options.execImpl;
+  }
+
+  get registration(): AdapterRegistration {
+    return this.reg;
+  }
+
+  async doctor(): Promise<DoctorResult> {
+    const probeOpts = this.execImpl ? { exec: this.execImpl } : {};
+    return probeAdapter(this.reg, probeOpts);
+  }
+
+  async listModels(): Promise<string[]> {
+    return [...this.reg.capabilities.models];
+  }
+
+  async start(session: AgentSession): Promise<RunningAgent> {
+    if (this.reg.unbound) {
+      throw new GenericAdapterError(
+        "unbound",
+        `adapter ${this.id} is unbound — set binary path or install CLI on PATH`,
+      );
+    }
+    if (!session.session_dir) {
+      throw new GenericAdapterError(
+        "missing_session_dir",
+        "session_dir must be set by the session runner before adapter.start",
+      );
+    }
+    if (!this.reg.start_template) {
+      throw new GenericAdapterError(
+        "missing_template",
+        `adapter ${this.id} has no start_template (configure adapters.registry[].start_template)`,
+      );
+    }
+
+    const binary = this.reg.binary_path ?? this.reg.binary;
+    const prompt_file = session.prompt_file ?? join(session.session_dir, "prompt.md");
+    const templateVars: {
+      cwd: string;
+      model: string;
+      prompt_file: string;
+      session_dir: string;
+      timeout_ms: number;
+      binary?: string;
+      args_prefix?: readonly string[];
+      agent_id?: string;
+      task_id?: string;
+    } = {
+      cwd: session.cwd,
+      model: session.model,
+      prompt_file,
+      session_dir: session.session_dir,
+      timeout_ms: session.timeout_ms,
+      binary,
+      agent_id: session.agent_id,
+    };
+    if (this.reg.args_prefix) templateVars.args_prefix = this.reg.args_prefix;
+    if (session.task_id !== undefined) templateVars.task_id = session.task_id;
+    const substituted = substituteStartTemplate(
+      this.reg.start_template,
+      templateVars,
+    );
+
+    let argv = splitTemplateArgv(substituted);
+    // If template did not include {binary}, prepend resolved binary + args_prefix.
+    if (argv.length === 0) {
+      throw new GenericAdapterError("empty_argv", "start_template produced empty argv");
+    }
+    // Ensure binary is first token when template is args-only.
+    if (
+      this.reg.start_template &&
+      !this.reg.start_template.includes("{binary}") &&
+      argv[0] !== binary
+    ) {
+      argv = [binary, ...(this.reg.args_prefix ?? []), ...argv];
+    }
+
+    const run_handle = extractRunHandle(session.session_dir);
+    const log_path = join(session.session_dir, "stdio.log");
+    await mkdir(session.session_dir, { recursive: true });
+
+    const cleanEnv = scrubEnv({
+      ...process.env,
+      ...session.env,
+      ...(this.reg.env ?? {}),
+    });
+
+    let spawned: SpawnedProcess;
+    try {
+      spawned = await this.spawnImpl({
+        argv,
+        cwd: session.cwd,
+        env: cleanEnv,
+        log_path,
+        session_dir: session.session_dir,
+        run_handle,
+      });
+    } catch (err) {
+      throw new GenericAdapterError(
+        "spawn",
+        `failed to spawn ${this.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    if (!Number.isFinite(spawned.pid) || spawned.pid <= 0) {
+      throw new GenericAdapterError("spawn", "spawn returned invalid pid");
+    }
+
+    const started_at = new Date().toISOString();
+    this.live.set(run_handle, { process: spawned, run_handle });
+
+    const agent: RunningAgent = {
+      run_handle,
+      pid: spawned.pid,
+      adapter_id: this.id,
+      agent_id: session.agent_id,
+      session_dir: session.session_dir,
+      started_at,
+      log_path,
+      wait: async (): Promise<SessionResult> => {
+        try {
+          const { exit_code, signal } = await spawned.wait();
+          if (signal !== null && (exit_code === null || exit_code !== 0)) {
+            const result: SessionResult = {
+              status: "cancelled",
+              adapter_id: this.id,
+              model_used: session.model,
+              summary: `${this.id} killed by signal ${signal}`,
+            };
+            if (exit_code !== null) result.exit_code = exit_code;
+            return result;
+          }
+          if (exit_code === null) {
+            return {
+              status: "cancelled",
+              adapter_id: this.id,
+              model_used: session.model,
+              summary: `${this.id} exited without code (signal)`,
+            };
+          }
+          const status = exit_code === 0 ? "ok" : "error";
+          return {
+            status,
+            exit_code,
+            adapter_id: this.id,
+            model_used: session.model,
+            summary:
+              status === "ok"
+                ? `${this.id} exited 0`
+                : `${this.id} exited ${exit_code}`,
+          };
+        } finally {
+          this.live.delete(run_handle);
+        }
+      },
+    };
+    if (session.task_id !== undefined) agent.task_id = session.task_id;
+    return agent;
+  }
+
+  async cancel(runHandle: string): Promise<void> {
+    const entry = this.live.get(runHandle);
+    if (!entry) return;
+    try {
+      entry.process.kill();
+    } catch {
+      // best-effort
+    }
+  }
+}
+
+function extractRunHandle(sessionDir: string): string {
+  const parts = sessionDir.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || "unknown";
+}
+
+export function createGenericAdapter(
+  registration: AdapterRegistration,
+  options: Omit<GenericAdapterOptions, "registration"> = {},
+): GenericCliAdapter {
+  return new GenericCliAdapter({ registration, ...options });
+}
