@@ -7,7 +7,7 @@ import { EventBus } from "./events.js";
 import { createDaemonHttpServer } from "./http-server.js";
 import { startDaemon, stopDaemon, type ServeResult } from "./serve.js";
 import { ensureDaemon } from "./ensure-daemon.js";
-import { inspectDaemonLock } from "./lockfile.js";
+import { inspectDaemonLock, readDaemonToken } from "./lockfile.js";
 
 const temps: string[] = [];
 const serves: Array<{ serve: ServeResult; home: string }> = [];
@@ -294,5 +294,53 @@ describe("daemon HTTP stubs", () => {
 
     ac.abort();
     dropServe(serve);
+  });
+
+  it("concurrent start: one owner; disk token matches owner and attachers", async () => {
+    const home = await tempHome();
+    const N = 8;
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        startDaemon({
+          homeDir: home,
+          port: 0,
+          attachIfRunning: true,
+          attachRetryMs: 5000,
+          requireAuth: true,
+        }),
+      ),
+    );
+
+    const owners = results.filter((r) => r.started);
+    expect(owners).toHaveLength(1);
+    const owner = owners[0]!;
+    serves.push({ serve: owner, home });
+
+    // All results share the same endpoint
+    for (const r of results) {
+      expect(r.port).toBe(owner.port);
+      expect(r.url).toBe(owner.url);
+    }
+
+    // Disk token equals owner's in-memory token (no loser overwrite)
+    const diskToken = await readDaemonToken(home);
+    expect(diskToken).toBe(owner.token);
+    for (const r of results) {
+      expect(r.token).toBe(owner.token);
+    }
+
+    // Bearer with disk token works against requireAuth owner
+    const ok = await fetch(`${owner.url}/v1/projects`, {
+      headers: { Authorization: `Bearer ${diskToken}` },
+    });
+    expect(ok.status).toBe(200);
+
+    const bad = await fetch(`${owner.url}/v1/projects`, {
+      headers: { Authorization: "Bearer wrong" },
+    });
+    expect(bad.status).toBe(401);
+
+    await stopDaemon(owner, home);
+    dropServe(owner);
   });
 });

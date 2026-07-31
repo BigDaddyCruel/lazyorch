@@ -6,6 +6,7 @@ import {
   DEFAULT_PORT,
   PORT_RANGE_END,
   daemonLogPath,
+  daemonTokenPath,
   userLazyorchDir,
 } from "./paths.js";
 import {
@@ -14,6 +15,8 @@ import {
   assertApiMajor,
   buildLock,
   inspectDaemonLock,
+  isPidAlive,
+  readDaemonLock,
   readDaemonToken,
   removeDaemonLock,
   writeDaemonLock,
@@ -40,10 +43,12 @@ export interface ServeOptions {
   attachIfRunning?: boolean;
   /** Force Bearer auth even on loopback. */
   requireAuth?: boolean;
-  /** Pre-set token (tests). */
+  /** Pre-set token (tests). Only written when this process becomes the owner. */
   token?: string;
   /** Append a start line to daemon.log (default true). */
   writeLog?: boolean;
+  /** Max ms to wait for mid-bind owner HTTP when attaching (default 2500). */
+  attachRetryMs?: number;
 }
 
 export interface ServeResult {
@@ -104,8 +109,9 @@ export async function pickPort(
 
 /**
  * Start the user-level daemon (HTTP + SSE) with exclusive lockfile single-instance.
- * If a healthy daemon already holds the lock and `attachIfRunning` is true
- * (default), returns that endpoint without starting a second instance.
+ *
+ * Token is written only after this process owns the exclusive lock (after bind
+ * succeeds for the final lock record). Attach paths only read `daemon.token`.
  */
 export async function startDaemon(
   options: ServeOptions = {},
@@ -114,111 +120,76 @@ export async function startDaemon(
   const host = options.host ?? DEFAULT_HOST;
   const preferred = options.port ?? DEFAULT_PORT;
   const attachIfRunning = options.attachIfRunning !== false;
+  const attachRetryMs = options.attachRetryMs ?? 2500;
+  // Path only — file is not written until we own the lock
+  const tokenPath = daemonTokenPath(homeDir);
 
   if (attachIfRunning) {
-    const existing = await inspectDaemonLock(homeDir);
-    if (existing.healthy && existing.lock) {
-      assertApiMajor(existing.lock);
-      const healthy = await probeHealth(existing.lock.host, existing.lock.port);
-      if (healthy) {
-        const token =
-          (await readDaemonToken(homeDir)) ??
-          options.token ??
-          "";
-        return {
-          started: false,
-          host: existing.lock.host,
-          port: existing.lock.port,
-          url: `http://${existing.lock.host}:${existing.lock.port}`,
-          token,
-          lock: existing.lock,
-        };
-      }
-      // Stale lock with dead HTTP — clear and continue
-      await removeDaemonLock(homeDir, { force: true });
-    } else if (existing.lock && !existing.healthy) {
-      await removeDaemonLock(homeDir, { force: true });
-    }
+    const attachOpts: Parameters<typeof tryAttachExisting>[1] = { retryMs: 0 };
+    if (options.token !== undefined) attachOpts.fallbackToken = options.token;
+    const attached = await tryAttachExisting(homeDir, attachOpts);
+    if (attached) return attached;
   }
 
-  // Token before exclusive lock so path is known for provisional record
-  const { path: tokenPath, token } = await writeDaemonToken(
-    homeDir,
-    options.token,
-  );
   const startedAt = new Date().toISOString();
-
-  // Exclusive lock claim BEFORE bind (prevents dual-daemon race)
   const provisional = buildLock({
     port: preferred === 0 ? 0 : preferred,
     host,
     tokenPath,
     startedAt,
   });
+
   try {
     await acquireDaemonLockExclusive(provisional, homeDir, {
       force: !attachIfRunning,
     });
   } catch (err) {
-    if (
-      typeof err === "object" &&
-      err !== null &&
-      "code" in err &&
-      (err as { code: unknown }).code === "lock_held" &&
-      "lock" in err
-    ) {
-      const held = (err as { lock: DaemonLock }).lock;
-      assertApiMajor(held);
-      if (attachIfRunning) {
-        const healthy = await probeHealth(held.host, held.port);
-        if (healthy) {
-          const t = (await readDaemonToken(homeDir)) ?? token;
-          return {
-            started: false,
-            host: held.host,
-            port: held.port,
-            url: `http://${held.host}:${held.port}`,
-            token: t,
-            lock: held,
-          };
-        }
-      }
+    if (isLockHeldError(err) && attachIfRunning) {
+      // Owner may still be binding; retry health + re-read lock/token
+      const held = err.lock;
+      const attachOpts: Parameters<typeof tryAttachExisting>[1] = {
+        retryMs: attachRetryMs,
+        knownLock: held,
+      };
+      if (options.token !== undefined) attachOpts.fallbackToken = options.token;
+      const attached = await tryAttachExisting(homeDir, attachOpts);
+      if (attached) return attached;
     }
     throw err;
   }
 
-  const wantEphemeral = preferred === 0;
-  let portHint: number;
+  // --- We own the exclusive lock. Token write is safe only from here. ---
+  let http: DaemonHttpServer | undefined;
   try {
-    portHint = wantEphemeral
+    const wantEphemeral = preferred === 0;
+    const portHint = wantEphemeral
       ? 0
       : await pickPort(preferred, host, options.fixedPort === true);
-  } catch (err) {
-    await removeDaemonLock(homeDir, { force: true, expectedPid: process.pid });
-    throw err;
-  }
 
-  const registry = new ProjectRegistry(homeDir);
-  await registry.load();
-  const bus = new EventBus();
+    // Rotate token only as lock owner (before bind so disk matches memory
+    // by the time /health is reachable).
+    const { token } = await writeDaemonToken(homeDir, options.token);
 
-  const httpCtx: DaemonHttpContext = {
-    registry,
-    bus,
-    token,
-    startedAt,
-    host,
-    port: portHint,
-  };
-  if (options.requireAuth !== undefined) {
-    httpCtx.requireAuth = options.requireAuth;
-  }
-  const http = createDaemonHttpServer(httpCtx);
+    const registry = new ProjectRegistry(homeDir);
+    await registry.load();
+    const bus = new EventBus();
 
-  try {
+    const httpCtx: DaemonHttpContext = {
+      registry,
+      bus,
+      token,
+      startedAt,
+      host,
+      port: portHint,
+    };
+    if (options.requireAuth !== undefined) {
+      httpCtx.requireAuth = options.requireAuth;
+    }
+    http = createDaemonHttpServer(httpCtx);
+
     await new Promise<void>((resolve, reject) => {
-      http.server.once("error", reject);
-      http.server.listen(portHint, host, () => resolve());
+      http!.server.once("error", reject);
+      http!.server.listen(portHint, host, () => resolve());
     });
 
     const addr = http.server.address();
@@ -268,10 +239,12 @@ export async function startDaemon(
       bus,
     };
   } catch (err) {
-    try {
-      await http.close();
-    } catch {
-      /* ignore */
+    if (http) {
+      try {
+        await http.close();
+      } catch {
+        /* ignore */
+      }
     }
     await removeDaemonLock(homeDir, {
       force: true,
@@ -310,6 +283,99 @@ export async function appendDaemonLog(
   const dir = userLazyorchDir(homeDir);
   await mkdir(dir, { recursive: true });
   await appendFile(daemonLogPath(homeDir), line, "utf8");
+}
+
+/**
+ * Attach to an existing healthy daemon. Never writes the token file.
+ * When `retryMs` > 0, polls until HTTP is up (mid-bind owner) or deadline.
+ */
+async function tryAttachExisting(
+  homeDir: string | undefined,
+  opts: {
+    retryMs: number;
+    knownLock?: DaemonLock;
+    fallbackToken?: string;
+  },
+): Promise<ServeResult | null> {
+  const deadline = Date.now() + Math.max(0, opts.retryMs);
+  let attempt = 0;
+
+  for (;;) {
+    attempt += 1;
+    let lock = opts.knownLock;
+    if (!lock || attempt > 1) {
+      const inspected = await inspectDaemonLock(homeDir);
+      if (!inspected.lock) {
+        if (Date.now() >= deadline) return null;
+        await sleep(50);
+        continue;
+      }
+      if (!inspected.healthy) {
+        // Dead pid only — safe to clear
+        if (!isPidAlive(inspected.lock.pid)) {
+          await removeDaemonLock(homeDir, { force: true });
+        }
+        if (Date.now() >= deadline) return null;
+        await sleep(50);
+        continue;
+      }
+      lock = inspected.lock;
+    } else {
+      // Refresh known lock (port may update after owner binds)
+      const latest = await readDaemonLock(homeDir);
+      if (latest && isPidAlive(latest.pid)) {
+        lock = latest;
+      } else if (latest && !isPidAlive(latest.pid)) {
+        await removeDaemonLock(homeDir, { force: true });
+        if (Date.now() >= deadline) return null;
+        await sleep(50);
+        continue;
+      }
+    }
+
+    try {
+      assertApiMajor(lock);
+    } catch {
+      throw new ApiMajorMismatchError(lock.api_major);
+    }
+
+    if (lock.port > 0 && (await probeHealth(lock.host, lock.port))) {
+      // Attach path: read only — never rotate token
+      const token = (await readDaemonToken(homeDir)) ?? opts.fallbackToken ?? "";
+      return {
+        started: false,
+        host: lock.host,
+        port: lock.port,
+        url: `http://${lock.host}:${lock.port}`,
+        token,
+        lock,
+      };
+    }
+
+    if (Date.now() >= deadline) {
+      // Live pid but HTTP never became ready within window
+      return null;
+    }
+    await sleep(50);
+  }
+}
+
+function isLockHeldError(
+  err: unknown,
+): err is Error & { code: "lock_held"; lock: DaemonLock } {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: unknown }).code === "lock_held" &&
+    "lock" in err &&
+    typeof (err as { lock: unknown }).lock === "object" &&
+    (err as { lock: unknown }).lock !== null
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 async function probeHealth(host: string, port: number): Promise<boolean> {
