@@ -26,7 +26,7 @@ lazyorch/
     forge/       # git + github
     shared/      # logging, ids, config schemas
   apps/
-    gui/         # Tauri 2 + web UI (placeholder)
+    gui/         # Tauri 2 + React/Vite web UI MVP
   docs/
   tests/
 ```
@@ -74,8 +74,12 @@ per-package `test` scripts.
 | `pnpm format:check` | Prettier check                                   |
 | `pnpm typecheck`    | `tsc -b` (project references, emits `dist`)      |
 | `pnpm test`         | Vitest from repo root                            |
-| `pnpm build`        | `tsc -b` all TypeScript packages                 |
+| `pnpm build`        | `tsc -b` packages + GUI Vite build               |
 | `pnpm clean`        | `tsc -b --clean`                                 |
+| `pnpm gui:dev`      | Vite dev server for `@lazyorch/gui` (:1420)      |
+| `pnpm gui:build`    | Production web build for the GUI                 |
+
+Desktop (Tauri) steps: see [`apps/gui/README.md`](apps/gui/README.md).
 
 ## License
 

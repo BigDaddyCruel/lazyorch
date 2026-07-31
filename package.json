@@ -10,14 +10,16 @@
   },
   "packageManager": "pnpm@11.18.0",
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && pnpm --filter @lazyorch/gui build",
     "clean": "tsc -b --clean",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc -b --pretty false",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "typecheck": "tsc -b --pretty false && pnpm --filter @lazyorch/gui typecheck",
+    "test": "vitest run && pnpm --filter @lazyorch/gui test",
+    "test:watch": "vitest",
+    "gui:dev": "pnpm --filter @lazyorch/gui dev",
+    "gui:build": "pnpm --filter @lazyorch/gui build"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
