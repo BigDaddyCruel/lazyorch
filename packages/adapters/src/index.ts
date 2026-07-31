@@ -1,6 +1,6 @@
 /**
- * @lazyorch/adapters — session runner (KD-40), shell adapter, budget hours stub.
- * PR-07 foundation; registry + coding adapters land in PR-08/09.
+ * @lazyorch/adapters — session runner (KD-40), shell adapter, budget hours,
+ * adapter registry + discovery (PR-08). Coding adapter depth lands in PR-09.
  */
 export const PACKAGE_NAME = "@lazyorch/adapters" as const;
 
@@ -92,3 +92,57 @@ export {
   type ShellAllowlistConfig,
   type AllowlistResult,
 } from "./shell/index.js";
+
+export {
+  AdapterRegistry,
+  createAdapterRegistry,
+  BUILTIN_ADAPTER_IDS,
+  BUILTIN_CATALOG,
+  DEFAULT_TIER_MAPS,
+  codingCapabilities,
+  shellCapabilities,
+  getBuiltinCatalogEntry,
+  isBuiltinAdapterId,
+  matrixFlagsFor,
+  resolveBinary,
+  discoverBinary,
+  probeAdapter,
+  parseVersionString,
+  versionMeetsFloor,
+  defaultExecImpl,
+  resolveAdapterRegistrations,
+  buildHealthMatrix,
+  doctorAdapters,
+  healthRowFrom,
+  GenericCliAdapter,
+  GenericAdapterError,
+  createGenericAdapter,
+  splitTemplateArgv,
+  templateToArgv,
+  type AdapterCapabilities,
+  type AdapterRegistration,
+  type AdapterHealthRow,
+  type AdapterHealthStatus,
+  type BuiltinCatalogEntry,
+  type BuiltinAdapterId,
+  type CapabilityMatrixFlags,
+  type HealthMatrix,
+  type UsageReporting,
+  type DiscoverEnv,
+  type DiscoverOptions,
+  type DiscoverResult,
+  type ExecImpl,
+  type ExecResult,
+  type ProbeOptions,
+  type ResolveRegistryOptions,
+  type HealthOptions,
+  type AdapterRegistryOptions,
+  type TemplateVars,
+} from "./registry/index.js";
+
+export {
+  resolveSpawnTarget,
+  isWindowsShellScript,
+  quoteWindowsArg,
+  type ResolvedSpawnTarget,
+} from "./spawn-policy.js";

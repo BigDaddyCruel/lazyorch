@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { runInit } from "./commands/init.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runContext, type ContextSubcommand } from "./commands/context.js";
+import { runAdapter, type AdapterSubcommand } from "./commands/adapter.js";
 
 export const PACKAGE_NAME = "@lazyorch/cli" as const;
 
@@ -26,6 +27,12 @@ export {
   type ContextResult,
   type ContextSubcommand,
 } from "./commands/context.js";
+export {
+  runAdapter,
+  type AdapterCommandOptions,
+  type AdapterCommandResult,
+  type AdapterSubcommand,
+} from "./commands/adapter.js";
 
 const HELP = `lazyorch — AI agent orchestration CLI
 
@@ -35,6 +42,7 @@ Usage:
 Commands:
   init     Create .lazyorch/config.yml and project.json skeleton
   doctor   Validate config, slot packing, and adapter binaries
+  adapter  Adapter registry (list|register|test)
   context  Shared run context KV (list|get|set|delete)
   help     Show this help
 
@@ -48,6 +56,15 @@ doctor options:
   --ci           Treat as CI/headless (timeout_action default fail when unset)
   --no-ci        Force interactive semantics (overrides CI/GITHUB_ACTIONS env)
 
+adapter usage:
+  lazyorch adapter list [--repo <path>] [--enabled] [--probe]
+  lazyorch adapter register --id <id> --binary <path> [--name <display>] [--start-template <t>] [--capabilities <json>] [--repo <path>]
+  lazyorch adapter test [id] [--repo <path>]
+
+  list is resolve-only by default (no version spawn). Pass --probe for live
+  version checks, or use adapter test. Unbound adapters warn (exit 0);
+  hard probe errors fail (exit 1). start_template recommended for custom ids.
+
 context usage:
   lazyorch context list --run <id> [--repo <path>]
   lazyorch context get <key> --run <id> [--repo <path>]
@@ -56,6 +73,7 @@ context usage:
 `;
 
 const CONTEXT_ACTIONS = new Set<string>(["list", "get", "set", "delete"]);
+const ADAPTER_ACTIONS = new Set<string>(["list", "register", "test"]);
 
 async function main(argv: string[]): Promise<number> {
   let values: Record<string, unknown>;
@@ -68,6 +86,13 @@ async function main(argv: string[]): Promise<number> {
         name: { type: "string" },
         repo: { type: "string" },
         run: { type: "string" },
+        id: { type: "string" },
+        binary: { type: "string" },
+        "start-template": { type: "string" },
+        capabilities: { type: "string" },
+        enabled: { type: "boolean", default: false },
+        probe: { type: "boolean", default: false },
+        "skip-probe": { type: "boolean", default: false },
         force: { type: "boolean", default: false },
         ci: { type: "boolean", default: false },
         "no-ci": { type: "boolean", default: false },
@@ -121,6 +146,41 @@ async function main(argv: string[]): Promise<number> {
         doctorOpts.ci = true;
       }
       const result = await runDoctor(doctorOpts);
+      return result.exitCode;
+    }
+    case "adapter": {
+      const actionRaw = positionals[1];
+      if (!actionRaw || !ADAPTER_ACTIONS.has(actionRaw)) {
+        process.stderr.write(
+          `error: adapter requires list|register|test\n\n${HELP}`,
+        );
+        return 2;
+      }
+      const action = actionRaw as AdapterSubcommand;
+      const adapterOpts: Parameters<typeof runAdapter>[0] = { action };
+      if (typeof values.repo === "string") adapterOpts.repo = values.repo;
+      if (typeof values.id === "string") adapterOpts.id = values.id;
+      if (typeof values.binary === "string") adapterOpts.binary = values.binary;
+      if (typeof values.name === "string") adapterOpts.displayName = values.name;
+      if (typeof values["start-template"] === "string") {
+        adapterOpts.startTemplate = values["start-template"];
+      }
+      if (typeof values.capabilities === "string") {
+        adapterOpts.capabilitiesJson = values.capabilities;
+      }
+      if (values.enabled === true) adapterOpts.enabledOnly = true;
+      // list: resolve-only by default; --probe opts into version exec
+      if (values.probe === true) adapterOpts.probe = true;
+      if (values["skip-probe"] === true) adapterOpts.skipProbe = true;
+      // Positional id for `adapter test <id>`
+      if (action === "test" && typeof positionals[2] === "string") {
+        adapterOpts.id = positionals[2];
+      }
+      // Positional id for `adapter register <id>` when --id omitted
+      if (action === "register" && !adapterOpts.id && typeof positionals[2] === "string") {
+        adapterOpts.id = positionals[2];
+      }
+      const result = await runAdapter(adapterOpts);
       return result.exitCode;
     }
     case "context": {
