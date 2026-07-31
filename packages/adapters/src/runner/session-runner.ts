@@ -496,6 +496,12 @@ class SessionRunnerImpl implements SessionRunner {
 
     const ended_at = new Date(this.now()).toISOString();
     this.budget_tracker.recordSessionEnd(state.run_handle, this.now());
+    // Best-effort usage aggregation (PR-18): adapter-reported cost or model_rates.
+    this.budget_tracker.recordUsage(
+      state.run_handle,
+      result.usage,
+      result.model_used ?? state.session.model,
+    );
 
     await updateSessionRecord(sessionsFilePath(this.run_dir), state.run_handle, {
       status: result.status,

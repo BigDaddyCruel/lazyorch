@@ -119,6 +119,8 @@ export const DEFAULT_MODELS_ROUTING_CONFIG: ModelsRoutingConfig = {
   escalate_after_failures: 1,
   max_tier: "xlarge",
   budget_tier_cap: "medium",
+  budget_pressure_threshold_usd: null,
+  budget_pressure_threshold_hours: 0.25,
   role_tier_floor: { ...DEFAULT_ROLE_TIER_FLOOR },
   role_tier_ceiling: {},
   score_bands: { ...DEFAULT_SCORE_BANDS },

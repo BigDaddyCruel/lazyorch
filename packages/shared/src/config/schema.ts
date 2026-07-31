@@ -113,6 +113,24 @@ export const ModelsConfigSchema = z.object({
   escalate_after_failures: z.number().int().nonnegative().default(1),
   max_tier: ModelTierSchema.default("xlarge"),
   budget_tier_cap: ModelTierSchema.default("medium"),
+  /**
+   * Remaining USD under which the router applies budget_tier_cap (best-effort).
+   * null → never pressure from USD alone.
+   */
+  budget_pressure_threshold_usd: z
+    .number()
+    .nonnegative()
+    .nullable()
+    .default(null),
+  /**
+   * Remaining agent-hours under which the router applies budget_tier_cap.
+   * Default 0.25h. null → never pressure from hours alone.
+   */
+  budget_pressure_threshold_hours: z
+    .number()
+    .nonnegative()
+    .nullable()
+    .default(0.25),
   role_tier_floor: z
     .object({
       plan_writer: ModelTierSchema.default("large"),
@@ -248,13 +266,26 @@ export const ForgeConfigSchema = z.object({
   merge_gate: z.enum(["human", "auto"]).default("human"),
 });
 
+/**
+ * Per-model token pricing for best-effort USD estimates when adapters
+ * only report tokens (design: budget.model_rates).
+ * Rates are USD per million tokens (in / out).
+ */
+export const ModelRateSchema = z.object({
+  in_per_mtok: z.number().nonnegative(),
+  out_per_mtok: z.number().nonnegative(),
+});
+export type ModelRate = z.infer<typeof ModelRateSchema>;
+
 export const BudgetConfigSchema = z.object({
   max_usd_per_run: z.number().nonnegative().nullable().default(null),
   max_agent_hours: z.number().nonnegative().nullable().default(null),
   max_run_hours: z.number().nonnegative().nullable().default(null),
   hard_stop: z.boolean().default(true),
-  model_rates: z.record(z.string(), z.unknown()).default(() => ({})),
+  /** Optional model id → {in_per_mtok, out_per_mtok} (USD per 1M tokens). */
+  model_rates: z.record(z.string(), ModelRateSchema).default(() => ({})),
 });
+export type BudgetConfig = z.infer<typeof BudgetConfigSchema>;
 
 export const ShellConfigSchema = z.object({
   allowed_commands: z
