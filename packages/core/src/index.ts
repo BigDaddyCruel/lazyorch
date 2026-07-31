@@ -3,6 +3,7 @@
  * PR-02: types, IDs, JSON I/O, schema_version, DAG/issue helpers.
  * PR-03: dual FSM engine (run + task), exit predicate, simulator.
  * PR-05: planning engine (validators, consensus, fake ports, replan hooks).
+ * PR-10: model complexity router (estimator KD-41, router KD-42).
  * PR-14: shared run context KV (context.json + write ACL).
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
@@ -154,3 +155,71 @@ export {
   type PrepareReplanResult,
   type ResumeAfterReplanOptions,
 } from "./planning/index.js";
+
+export {
+  // defaults
+  DEFAULT_ROLE_BASE,
+  DEFAULT_UNKNOWN_ROLE_BASE,
+  DEFAULT_COMPLEXITY_WEIGHTS,
+  DEFAULT_SCORE_BANDS,
+  TIER_BAND_MIDPOINT,
+  DEFAULT_ROLE_TIER_FLOOR,
+  DEFAULT_TIER_MAPS,
+  DEFAULT_PREFERENCE_ORDER,
+  DEFAULT_ADAPTERS_DEFAULT,
+  DEFAULT_MODELS_ROUTING_CONFIG,
+  defaultAdaptersForRouting,
+  // tiers
+  tierIndex,
+  maxTier,
+  minTier,
+  nextTier,
+  prevTier,
+  mapTierToEffort,
+  scoreToTier,
+  tierBandMidpoint,
+  tierForModelId,
+  // estimator
+  clampScore,
+  roleBase,
+  locBucket,
+  planTierSoftPrior,
+  securityRiskHit,
+  estimateComplexity,
+  normalizeSignals,
+  // config merge
+  mergeModelsConfig,
+  // pick adapter
+  pickAdapter,
+  inferTierForModel,
+  // router
+  isDeterministicPath,
+  resolvePins,
+  routeModel,
+  route,
+  // events
+  toModelRoutedPayload,
+  modelRoutedEvent,
+  MODEL_ROUTED_EVENT,
+  // dry-run
+  dryRunRoute,
+  type ComplexitySignals,
+  type SessionKind,
+  type RouteReason,
+  type EffortLevel,
+  type ModelPin,
+  type ComplexityWeights,
+  type ScoreBands,
+  type ModelsRoutingConfig,
+  type AdapterRouteInfo,
+  type EscalateContext,
+  type RouteInput,
+  type PartialDeepModelsConfig,
+  type RouteResult,
+  type ModelRoutedPayload,
+  type EstimateResult,
+  type PickAdapterInput,
+  type PickAdapterResult,
+  type DryRunRouteParams,
+  type DryRunRouteResult,
+} from "./models/index.js";
