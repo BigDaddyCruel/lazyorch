@@ -53,6 +53,28 @@ function modelForTier(a: AdapterRouteInfo, tier: ModelTier): string | undefined 
 }
 
 /**
+ * Placeholder adapter_id on LLM-path failure — never shell.
+ * Prefer non-shell adapters_default, then adapter_override (if non-shell),
+ * then first non-shell candidate, else DEFAULT_ADAPTERS_DEFAULT.
+ */
+function nonShellErrorPlaceholder(
+  adaptersDefault: string,
+  adapterOverride: string | undefined,
+  preference: string[],
+  adapters: AdapterRouteInfo[],
+): string {
+  if (adaptersDefault !== "shell") return adaptersDefault;
+  if (adapterOverride && adapterOverride !== "shell") return adapterOverride;
+  for (const id of preference) {
+    if (id !== "shell") return id;
+  }
+  for (const a of adapters) {
+    if (!isShell(a)) return a.id;
+  }
+  return DEFAULT_ADAPTERS_DEFAULT;
+}
+
+/**
  * Resolve adapter + model for the LLM path.
  * Shell adapters are ignored on the preference_order path.
  */
@@ -115,6 +137,22 @@ export function pickAdapter(input: PickAdapterInput): PickAdapterResult {
     return out;
   };
 
+  const errorAdapterId = (): string => {
+    const candidate =
+      input.adapter_override !== undefined && input.adapter_override !== "shell"
+        ? input.adapter_override
+        : undefined;
+    const placeholder = nonShellErrorPlaceholder(
+      adaptersDefault,
+      candidate,
+      preference,
+      adapters,
+    );
+    // If adapter_override is shell or missing, still never return shell
+    if (placeholder === "shell") return DEFAULT_ADAPTERS_DEFAULT;
+    return placeholder;
+  };
+
   // Pin locked: no silent step-down below intentional pin
   if (input.pin_locked) {
     for (const id of orderedCandidates(startTier)) {
@@ -129,7 +167,7 @@ export function pickAdapter(input: PickAdapterInput): PickAdapterResult {
       }
     }
     return {
-      adapter_id: input.adapter_override ?? adaptersDefault,
+      adapter_id: errorAdapterId(),
       model: input.model_override ?? "n/a",
       tier: startTier,
       stepped_down: false,
@@ -156,7 +194,7 @@ export function pickAdapter(input: PickAdapterInput): PickAdapterResult {
   }
 
   return {
-    adapter_id: adaptersDefault,
+    adapter_id: errorAdapterId(),
     model: "n/a",
     tier: startTier,
     stepped_down: false,

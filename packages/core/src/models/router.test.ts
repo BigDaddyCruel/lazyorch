@@ -162,6 +162,46 @@ describe("pin_locked (KD-42)", () => {
     expect(result.model).toBe("claude-opus-4-6");
     expect(result.tier).toBe("xlarge"); // inferred from tier_map
   });
+
+  it("task tier pin beats lower-priority run model pin (single-source)", () => {
+    // KD-42: task > run; do not field-merge run model over task tier
+    const result = routeModel({
+      role: "worker",
+      task_pin: { tier_override: "nano" },
+      run_pin: { model_override: "claude-opus-4-6" },
+      adapters: [fullClaude],
+    });
+    expect(result.tier).toBe("nano");
+    expect(result.model).toBe("claude-haiku-4-5");
+    expect(result.reason).toBe("override");
+    expect(result.pin_locked).toBe(true);
+  });
+
+  it("same-source model_override beats tier_override", () => {
+    const result = routeModel({
+      role: "worker",
+      task_pin: {
+        tier_override: "nano",
+        model_override: "claude-opus-4-6",
+      },
+      adapters: [fullClaude],
+    });
+    expect(result.model).toBe("claude-opus-4-6");
+    expect(result.tier).toBe("xlarge");
+    expect(result.reason).toBe("override");
+  });
+
+  it("task model pin beats run tier pin", () => {
+    const result = routeModel({
+      role: "worker",
+      task_pin: { model_override: "claude-opus-4-6" },
+      run_pin: { tier_override: "nano" },
+      adapters: [fullClaude],
+    });
+    expect(result.model).toBe("claude-opus-4-6");
+    expect(result.tier).toBe("xlarge");
+    expect(result.reason).toBe("override");
+  });
 });
 
 describe("budget cap", () => {
@@ -305,6 +345,42 @@ describe("routing_enabled false", () => {
     expect(result.tier).toBe("medium");
     expect(result.reason).toBe("routing_disabled");
   });
+
+  it("ignores tier/model pins when routing disabled (design step 1)", () => {
+    const result = routeModel({
+      role: "worker",
+      task_pin: {
+        model_override: "claude-opus-4-6",
+        tier_override: "nano",
+      },
+      config: { routing_enabled: false },
+      adapters: [fullClaude],
+    });
+    expect(result.reason).toBe("routing_disabled");
+    expect(result.pin_locked).toBe(false);
+    // worker floor small — not nano pin, not opus model
+    expect(result.tier).toBe("small");
+    expect(result.model).toBe("claude-haiku-4-5");
+    expect(result.model).not.toBe("claude-opus-4-6");
+  });
+
+  it("still prefers adapter_override when routing disabled", () => {
+    const codex: AdapterRouteInfo = {
+      id: "codex",
+      healthy: true,
+      tier_map: { ...DEFAULT_TIER_MAPS.codex },
+    };
+    const result = routeModel({
+      role: "worker",
+      task_pin: { adapter_override: "codex" },
+      config: { routing_enabled: false },
+      adapters: [fullClaude, codex],
+    });
+    expect(result.reason).toBe("routing_disabled");
+    expect(result.adapter_id).toBe("codex");
+    expect(result.tier).toBe("small");
+    expect(result.pin_locked).toBe(false);
+  });
 });
 
 describe("deterministic shell path", () => {
@@ -350,8 +426,8 @@ describe("deterministic shell path", () => {
       adapters_default: "shell",
     });
     expect(result.error).toBe("no adapter for tier");
-    expect(result.adapter_id).not.toBe(""); // still returns something
-    // must not silently succeed as shell coding fallback
+    // Error placeholder must not advertise shell on an LLM session
+    expect(result.adapter_id).not.toBe("shell");
     expect(result.session_kind).toBe("llm");
     expect(result.reason).not.toBe("deterministic");
   });

@@ -53,8 +53,11 @@ export function isDeterministicPath(input: RouteInput): boolean {
 
 /**
  * Resolve pins in priority order (task > run > lead).
- * First non-undefined field per key wins.
- * pin_locked only when tier_override or model_override is set (not adapter alone).
+ *
+ * Model/tier are a **single-source decision** (KD-42): walk sources highest→lowest;
+ * first source that supplies model_override **or** tier_override wins that pair.
+ * Within a source, model_override beats tier_override (design step 4a).
+ * adapter_override is still field-first across sources (does not set pin_locked).
  */
 export function resolvePins(input: RouteInput): {
   tier_override?: ModelTier;
@@ -71,15 +74,23 @@ export function resolvePins(input: RouteInput): {
   let tier_override: ModelTier | undefined;
   let model_override: string | undefined;
   let adapter_override: string | undefined;
+  let modelOrTierResolved = false;
 
   for (const pin of sources) {
     if (!pin) continue;
-    if (model_override === undefined && pin.model_override !== undefined) {
-      model_override = pin.model_override;
+
+    if (!modelOrTierResolved) {
+      if (pin.model_override !== undefined) {
+        model_override = pin.model_override;
+        // Same-source tier is ignored when model is set (observability tier
+        // is inferred from the model later).
+        modelOrTierResolved = true;
+      } else if (pin.tier_override !== undefined) {
+        tier_override = pin.tier_override;
+        modelOrTierResolved = true;
+      }
     }
-    if (tier_override === undefined && pin.tier_override !== undefined) {
-      tier_override = pin.tier_override;
-    }
+
     if (adapter_override === undefined && pin.adapter_override !== undefined) {
       adapter_override = pin.adapter_override;
     }
@@ -185,20 +196,29 @@ export function routeModel(input: RouteInput): RouteResult {
 
   const pins = resolvePins(input);
 
-  // 1. routing_enabled == false → role floor (default medium), no estimator
+  // 1. routing_enabled == false → fixed path (design step 1):
+  //    tier = role floor ?? medium; ignore tier/model pins; adapter_override ok.
   if (!config.routing_enabled) {
-    // design: tier = role_tier_floor[role] ?? "medium"
     const disabledTier: ModelTier =
       config.role_tier_floor[input.role] ?? "medium";
 
     const picked = pickAdapter(
-      pickArgs(disabledTier, pins, {
-        preferred_adapters: input.preferred_adapters,
-        adapters,
-        adapters_default: adaptersDefault,
-        preference_order: preferenceOrder,
-        pin_locked: pins.pin_locked,
-      }),
+      pickArgs(
+        disabledTier,
+        {
+          // adapter_override only — no model pin on the disabled path
+          ...(pins.adapter_override !== undefined
+            ? { adapter_override: pins.adapter_override }
+            : {}),
+        },
+        {
+          preferred_adapters: input.preferred_adapters,
+          adapters,
+          adapters_default: adaptersDefault,
+          preference_order: preferenceOrder,
+          pin_locked: false,
+        },
+      ),
     );
 
     return finish({
@@ -208,7 +228,7 @@ export function routeModel(input: RouteInput): RouteResult {
       model: picked.model,
       reason: "routing_disabled",
       floor_violated: false,
-      pin_locked: pins.pin_locked,
+      pin_locked: false,
       ...(picked.error !== undefined ? { error: picked.error } : {}),
     });
   }
