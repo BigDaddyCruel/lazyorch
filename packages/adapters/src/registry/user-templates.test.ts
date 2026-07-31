@@ -25,7 +25,7 @@ describe("USER_ADAPTER_TEMPLATES", () => {
     expect(listUserAdapterTemplates()).toHaveLength(2);
   });
 
-  it("start templates use path-safe placeholders", () => {
+  it("start templates use path-safe / message-safe placeholders", () => {
     const aider = USER_ADAPTER_TEMPLATES.aider;
     expect(aider.start_template).toContain("{binary}");
     expect(aider.start_template).toContain("{model}");
@@ -33,8 +33,43 @@ describe("USER_ADAPTER_TEMPLATES", () => {
     expect(aider.start_template).toContain("--message-file");
 
     const oc = USER_ADAPTER_TEMPLATES.opencode;
+    // OpenCode run takes positional message; {prompt} = file contents.
     expect(oc.start_template).toContain("run");
-    expect(oc.start_template).toContain("{prompt_file}");
+    expect(oc.start_template).toContain("{prompt}");
+    expect(oc.start_template).not.toContain("--file");
+    expect(oc.start_template).not.toContain("{prompt_file}");
+  });
+
+  it("get/list return clones (mutating does not touch singleton)", () => {
+    const a = getUserAdapterTemplate("aider");
+    expect(a).toBeDefined();
+    if (a?.capabilities?.tier_map) {
+      a.capabilities.tier_map.small = "mutated";
+    }
+    const again = getUserAdapterTemplate("aider");
+    expect(again?.capabilities?.tier_map?.small).toBe("gpt-4o-mini");
+  });
+
+  it("opencode templateToArgv puts message body as positional {prompt}", () => {
+    const t = USER_ADAPTER_TEMPLATES.opencode;
+    const body = "Implement the feature.\nLine two.";
+    const argv = templateToArgv(t.start_template, {
+      cwd: "/proj",
+      model: "anthropic/claude-sonnet-4",
+      prompt_file: "/proj/prompt.md",
+      prompt: body,
+      session_dir: "/proj/sess",
+      timeout_ms: 60_000,
+      binary: "opencode",
+    });
+    expect(argv).toEqual([
+      "opencode",
+      "run",
+      "--model",
+      "anthropic/claude-sonnet-4",
+      "--auto",
+      body,
+    ]);
   });
 
   it("userTemplateToRegistryEntry is schema-valid", () => {

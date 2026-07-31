@@ -148,6 +148,55 @@ describe("parseUsageFromText", () => {
     });
   });
 
+  it("merges terminal cost-only result with prior token totals", () => {
+    const text = [
+      JSON.stringify({
+        type: "assistant",
+        message: { usage: { input_tokens: 100, output_tokens: 50 } },
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        total_cost_usd: 0.03,
+      }),
+    ].join("\n");
+    expect(parseUsageFromText(text)).toEqual({
+      input_tokens: 100,
+      output_tokens: 50,
+      estimated_usd: 0.03,
+    });
+  });
+
+  it("does not treat subtype-only objects as terminal", () => {
+    const text = [
+      JSON.stringify({
+        subtype: "success",
+        total_cost_usd: 0.99,
+      }),
+      JSON.stringify({
+        usage: { input_tokens: 1, output_tokens: 2 },
+      }),
+    ].join("\n");
+    // subtype alone must not lock out later usage
+    expect(parseUsageFromText(text)).toEqual({
+      input_tokens: 1,
+      output_tokens: 2,
+      estimated_usd: 0.99,
+    });
+  });
+
+  it("does not double-count non-Claude cache_read_tokens aliases", () => {
+    expect(
+      usageFromJsonObject({
+        usage: {
+          input_tokens: 100,
+          cache_read_tokens: 50,
+          output_tokens: 1,
+        },
+      }),
+    ).toEqual({ input_tokens: 100, output_tokens: 1 });
+  });
+
   it("parses embedded JSON after a log prefix", () => {
     const text = `INFO session done ${JSON.stringify({
       usage: { input_tokens: 4, output_tokens: 5, cost_usd: 0.001 },
@@ -183,6 +232,13 @@ describe("parseUsageFromText", () => {
         estimated_usd: 1.25,
       },
     );
+  });
+
+  it("ignores unrelated in: N and remote $ amounts", () => {
+    expect(parseUsageFromFreeText("retry in: 3 seconds")).toBeNull();
+    expect(
+      parseUsageFromFreeText("price is $9.99 but no usage reported"),
+    ).toBeNull();
   });
 
   it("returns null on empty", () => {

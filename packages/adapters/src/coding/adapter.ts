@@ -157,7 +157,9 @@ export class CodingCliAdapter implements AgentAdapter {
 
   /**
    * Configured models first; else live probe via models_args (registration or
-   * profile); else unique tier_map values. Fake mode skips the live probe.
+   * profile); else tier_map only when models_args was configured (routing
+   * examples — not an allowlist). Empty models + no models_args → [].
+   * Fake/unbound skip the live probe.
    */
   async listModels(): Promise<string[]> {
     const modelsArgs =

@@ -11,7 +11,7 @@
  * `lazyorch adapter register --id … --binary … --start-template "…"`.
  */
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scrubEnv } from "../scrub.js";
 import type {
@@ -32,6 +32,7 @@ export class GenericAdapterError extends Error {
     | "unbound"
     | "missing_template"
     | "missing_session_dir"
+    | "missing_prompt"
     | "spawn"
     | "empty_argv";
 
@@ -57,6 +58,12 @@ export interface TemplateVars {
   cwd: string;
   model: string;
   prompt_file: string;
+  /**
+   * Contents of prompt.md (or equivalent). Use as a **whole-token** `{prompt}`
+   * for CLIs that take the user message as a positional argv (e.g. opencode run).
+   * Prefer `{prompt_file}` when the CLI accepts a path (e.g. aider --message-file).
+   */
+  prompt?: string;
   session_dir: string;
   timeout_ms: number | string;
   binary?: string;
@@ -96,6 +103,7 @@ export function templateToArgv(
     "{cwd}": vars.cwd,
     "{model}": vars.model,
     "{prompt_file}": vars.prompt_file,
+    "{prompt}": vars.prompt ?? "",
     "{session_dir}": vars.session_dir,
     "{timeout_ms}": String(vars.timeout_ms),
     "{binary}": vars.binary ?? "",
@@ -199,7 +207,20 @@ export class GenericCliAdapter implements AgentAdapter {
     if (this.reg.args_prefix) templateVars.args_prefix = this.reg.args_prefix;
     if (session.task_id !== undefined) templateVars.task_id = session.task_id;
 
+    // Load prompt body when template uses {prompt} (positional message CLIs).
+    if (this.reg.start_template.includes("{prompt}")) {
+      try {
+        templateVars.prompt = await readFile(prompt_file, "utf8");
+      } catch (err) {
+        throw new GenericAdapterError(
+          "missing_prompt",
+          `failed to read prompt_file for {prompt}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     // Path-safe: tokenize template first, then substitute (no re-split of paths).
+    // Whole-token {prompt} stays a single argv entry (multi-line message OK).
     let argv = templateToArgv(this.reg.start_template, templateVars);
     if (argv.length === 0) {
       throw new GenericAdapterError(

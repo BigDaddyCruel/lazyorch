@@ -63,6 +63,19 @@ describe("parseModelListFromText", () => {
     ]);
   });
 
+  it("strips markdown list markers before tokenizing", () => {
+    const text = [
+      "- anthropic/claude-sonnet-4",
+      "* openai/gpt-4o",
+      "• google/gemini-2.5-pro",
+    ].join("\n");
+    expect(parseModelListFromText(text)).toEqual([
+      "anthropic/claude-sonnet-4",
+      "openai/gpt-4o",
+      "google/gemini-2.5-pro",
+    ]);
+  });
+
   it("returns empty for noise", () => {
     expect(parseModelListFromText("error: not found\n")).toEqual([]);
   });
@@ -79,7 +92,7 @@ describe("modelsFromRegistration", () => {
     expect(modelsFromRegistration(reg)).toEqual(["a", "b"]);
   });
 
-  it("falls back to unique tier_map values", () => {
+  it("returns empty when models unset (does not invent tier_map)", () => {
     const reg = baseReg({
       capabilities: codingCapabilities({
         models: [],
@@ -90,10 +103,7 @@ describe("modelsFromRegistration", () => {
         },
       }),
     });
-    expect(modelsFromRegistration(reg)).toEqual([
-      "claude-haiku-4-5",
-      "claude-sonnet-4-6",
-    ]);
+    expect(modelsFromRegistration(reg)).toEqual([]);
   });
 });
 
@@ -144,7 +154,7 @@ describe("probeModelList / resolveModelList", () => {
     expect(models).toEqual(["probed-a", "probed-b"]);
   });
 
-  it("resolve falls back to tier_map when probe skipped", async () => {
+  it("resolve falls back to tier_map when models_args set but probe skipped", async () => {
     const reg = baseReg({
       capabilities: codingCapabilities({
         models: [],
@@ -155,6 +165,17 @@ describe("probeModelList / resolveModelList", () => {
       skip_probe: true,
     });
     expect(models).toEqual(["s", "m"]);
+  });
+
+  it("resolve returns [] when models empty and no models_args", async () => {
+    const reg = baseReg({
+      capabilities: codingCapabilities({
+        models: [],
+        tier_map: { small: "s", medium: "m" },
+      }),
+    });
+    const models = await resolveModelList(reg, undefined, { skip_probe: true });
+    expect(models).toEqual([]);
   });
 
   it("probe returns [] when unbound", async () => {

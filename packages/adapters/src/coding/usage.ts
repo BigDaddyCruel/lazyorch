@@ -147,24 +147,27 @@ function usageFromFlat(obj: Record<string, unknown>): Usage | null {
     num(obj.promptTokens) ??
     num(obj.input);
 
-  const cacheRead =
-    num(obj.cache_read_input_tokens) ??
-    num(obj.cacheReadInputTokens) ??
-    num(obj.cache_read_tokens) ??
-    num(obj.cacheReadTokens);
+  // Claude/Anthropic-shaped cache fields only (input_tokens is non-cache base).
+  // Do not fold looser aliases — other CLIs may already include cache in input.
+  const hasClaudeCacheShape =
+    obj.cache_read_input_tokens !== undefined ||
+    obj.cacheReadInputTokens !== undefined ||
+    obj.cache_creation_input_tokens !== undefined ||
+    obj.cacheCreationInputTokens !== undefined;
 
+  const cacheRead =
+    num(obj.cache_read_input_tokens) ?? num(obj.cacheReadInputTokens);
   const cacheCreate =
     num(obj.cache_creation_input_tokens) ??
-    num(obj.cacheCreationInputTokens) ??
-    num(obj.cache_write_input_tokens) ??
-    num(obj.cacheWriteInputTokens) ??
-    num(obj.cache_creation_tokens);
+    num(obj.cacheCreationInputTokens);
 
-  // Fold cache tokens into billable input when present (Claude-style).
+  // Fold only for Claude-shaped breakdowns so codex/etc. never double-count.
   let input = baseInput;
-  const cacheExtra = (cacheRead ?? 0) + (cacheCreate ?? 0);
-  if (cacheExtra > 0) {
-    input = (baseInput ?? 0) + cacheExtra;
+  if (hasClaudeCacheShape) {
+    const cacheExtra = (cacheRead ?? 0) + (cacheCreate ?? 0);
+    if (cacheExtra > 0) {
+      input = (baseInput ?? 0) + cacheExtra;
+    }
   }
 
   const output =
@@ -187,12 +190,14 @@ function usageFromFlat(obj: Record<string, unknown>): Usage | null {
   return usage;
 }
 
-/** True when a JSON object looks like a terminal Claude/Codex result event. */
+/**
+ * True when a JSON object looks like a terminal result event.
+ * Requires type (result|completion|done); subtype alone is not enough
+ * (mid-stream objects may reuse success/error subtypes).
+ */
 function isTerminalResultEvent(obj: Record<string, unknown>): boolean {
   const t = obj.type;
-  if (t === "result" || t === "completion" || t === "done") return true;
-  if (obj.subtype === "success" || obj.subtype === "error") return true;
-  return false;
+  return t === "result" || t === "completion" || t === "done";
 }
 
 /**
@@ -239,34 +244,34 @@ export function parseUsageFromText(text: string): Usage | null {
   let bestIsTerminal = false;
 
   const consider = (parsed: unknown, terminal: boolean): void => {
+    const applyOne = (item: unknown, itemTerminal: boolean): void => {
+      const u = usageFromJsonObject(item);
+      if (!u) return;
+      if (itemTerminal && !bestIsTerminal) {
+        // Promote terminal without dropping prior token fields (cost-only result).
+        best = mergeUsage(best, u);
+        bestIsTerminal = true;
+        return;
+      }
+      if (!itemTerminal && bestIsTerminal) {
+        // After a terminal event, still fill missing fields from later non-terminal.
+        best = mergeUsage(u, best);
+        return;
+      }
+      // Same terminal-ness: later/richer wins, then merge to keep max fields.
+      const preferred = preferRicherUsage(best, u);
+      best = mergeUsage(best, preferred);
+    };
+
     if (Array.isArray(parsed)) {
       for (const item of parsed) {
-        const u = usageFromJsonObject(item);
-        if (!u) continue;
-        if (terminal && !bestIsTerminal) {
-          best = u;
-          bestIsTerminal = true;
-        } else if (terminal === bestIsTerminal) {
-          best = preferRicherUsage(best, u);
-        } else if (!bestIsTerminal) {
-          best = preferRicherUsage(best, u);
-        }
-        // if best is terminal and this is not, keep best unless richer+terminal already handled
+        const itemTerminal =
+          isRecord(item) && isTerminalResultEvent(item);
+        applyOne(item, itemTerminal || terminal);
       }
       return;
     }
-    const u = usageFromJsonObject(parsed);
-    if (!u) return;
-    if (terminal && !bestIsTerminal) {
-      best = u;
-      bestIsTerminal = true;
-      return;
-    }
-    if (!terminal && bestIsTerminal) {
-      // Keep terminal result unless this is somehow also terminal (handled above).
-      return;
-    }
-    best = preferRicherUsage(best, u);
+    applyOne(parsed, terminal);
   };
 
   for (const line of lines) {
@@ -296,20 +301,25 @@ export function parseUsageFromText(text: string): Usage | null {
 }
 
 /**
- * Free-text heuristics (last matches win). Covers common CLI summary lines.
+ * Free-text heuristics (last matches win). Conservative anchors to avoid
+ * inventing usage from noisy stdio (e.g. "retry in: 3", random $ amounts).
  */
 export function parseUsageFromFreeText(text: string): Usage | null {
   const usage: Usage = {};
 
-  // input_tokens: N / prompt tokens: N / Input tokens: N
+  // Explicit labels: input_tokens: N / prompt tokens: N
   const inputMatch = text.match(
     /(?:input[_ ]?tokens?|prompt[_ ]?tokens?)\s*[:=]\s*(\d+)/gi,
   );
-  // Also "Tokens: in=N" / "in: N tokens"
+  // "in=N" / "in: N" only when "token" appears nearby on the same line-ish window
   const inputAlt = text.match(
-    /(?:\bin\s*[:=]\s*(\d+)|(\d+)\s+input(?:\s+tokens?)?)/gi,
+    /(?:tokens?\s*[:=]?\s*)?\bin\s*[:=]\s*(\d+)(?=[^\n]{0,20}tokens?\b|\s*$)|(?:tokens?\s+)?in\s*[:=]\s*(\d+)/gi,
   );
-  // "X input / Y output" combined line
+  // Prefer patterns that include the word tokens: "in: 12 tokens"
+  const inputTokenish = [
+    ...text.matchAll(/\bin\s*[:=]\s*(\d+)\s*tokens?\b/gi),
+  ];
+  // "X input / Y output" combined line (token-ish pairing)
   const paired = [
     ...text.matchAll(
       /(\d+)\s*(?:input|prompt)\s*(?:tokens?)?\s*[/|,]\s*(\d+)\s*(?:output|completion)\s*(?:tokens?)?/gi,
@@ -324,45 +334,55 @@ export function parseUsageFromFreeText(text: string): Usage | null {
     if (inputMatch && inputMatch.length > 0) {
       const m = inputMatch[inputMatch.length - 1]?.match(/(\d+)\s*$/);
       if (m?.[1]) usage.input_tokens = Number(m[1]);
+    } else if (inputTokenish.length > 0) {
+      const last = inputTokenish[inputTokenish.length - 1];
+      if (last?.[1]) usage.input_tokens = Number(last[1]);
     } else if (inputAlt && inputAlt.length > 0) {
+      // Only accept inputAlt if "token" appears in the same match text
       const last = inputAlt[inputAlt.length - 1] ?? "";
-      const m = last.match(/(\d+)/);
-      if (m?.[1]) usage.input_tokens = Number(m[1]);
+      if (/token/i.test(last)) {
+        const m = last.match(/(\d+)/);
+        if (m?.[1]) usage.input_tokens = Number(m[1]);
+      }
     }
 
     const outputMatch = text.match(
       /(?:output[_ ]?tokens?|completion[_ ]?tokens?)\s*[:=]\s*(\d+)/gi,
     );
-    const outputAlt = text.match(
-      /(?:\bout\s*[:=]\s*(\d+)|(\d+)\s+output(?:\s+tokens?)?)/gi,
-    );
+    const outputTokenish = [
+      ...text.matchAll(/\bout\s*[:=]\s*(\d+)\s*tokens?\b/gi),
+    ];
     if (outputMatch && outputMatch.length > 0) {
       const m = outputMatch[outputMatch.length - 1]?.match(/(\d+)\s*$/);
       if (m?.[1]) usage.output_tokens = Number(m[1]);
-    } else if (outputAlt && outputAlt.length > 0) {
-      const last = outputAlt[outputAlt.length - 1] ?? "";
-      const m = last.match(/(\d+)/);
-      if (m?.[1]) usage.output_tokens = Number(m[1]);
+    } else if (outputTokenish.length > 0) {
+      const last = outputTokenish[outputTokenish.length - 1];
+      if (last?.[1]) usage.output_tokens = Number(last[1]);
     }
   }
 
+  // cost: 0.02 / total_cost_usd: …
   const costMatch = text.match(
     /(?:estimated_usd|total_cost_usd|cost_usd|total_cost|cost)\s*[:=]\s*\$?\s*([\d.]+)/gi,
   );
-  const costDollar = text.match(/\$\s*([\d]+\.[\d]+)/g);
   if (costMatch && costMatch.length > 0) {
     const m = costMatch[costMatch.length - 1]?.match(/([\d.]+)\s*$/);
     if (m?.[1]) {
       const c = Number(m[1]);
       if (Number.isFinite(c)) usage.estimated_usd = c;
     }
-  } else if (costDollar && costDollar.length > 0) {
-    // Only accept $N.NN near cost-ish context later; take last dollar amount
-    // when the word "cost" appears nearby in the full text.
-    if (/\bcost\b/i.test(text)) {
-      const m = costDollar[costDollar.length - 1]?.match(/([\d.]+)/);
-      if (m?.[1]) {
-        const c = Number(m[1]);
+  } else {
+    // $N.NN only when "cost" appears within ~40 chars of the amount
+    const costNearDollar = [
+      ...text.matchAll(
+        /(?:\bcost\b[^\n$]{0,40}\$\s*([\d]+\.[\d]+)|\$\s*([\d]+\.[\d]+)[^\n]{0,40}\bcost\b)/gi,
+      ),
+    ];
+    if (costNearDollar.length > 0) {
+      const last = costNearDollar[costNearDollar.length - 1];
+      const raw = last?.[1] ?? last?.[2];
+      if (raw) {
+        const c = Number(raw);
         if (Number.isFinite(c)) usage.estimated_usd = c;
       }
     }

@@ -3,8 +3,14 @@
  *
  * Many CLIs expose a models subcommand (e.g. `opencode models`); others do not.
  * When `models_args` is set on a registration/profile, we exec the binary and
- * parse stdout. Otherwise listModels falls back to capabilities.models, then
- * unique tier_map values.
+ * parse stdout.
+ *
+ * Resolution order for listModels / {@link resolveModelList}:
+ * 1. `capabilities.models` (config authoritative)
+ * 2. Live probe via `models_args` when configured
+ * 3. Unique `tier_map` values **only** when `models_args` was configured
+ *    (soft routing examples after a failed/empty probe) — not when models are
+ *    simply unspecified (empty still means “no advertised set”).
  *
  * Injectable exec — same contract as version probe — so unit tests need no
  * real CLI.
@@ -23,8 +29,11 @@ export interface ModelListProbeOptions {
   timeout_ms?: number;
 }
 
+/** Max length for a single model id token (aligned with MODEL_ID_RE). */
+export const MODEL_ID_MAX_LEN = 120;
+
 const MODEL_ID_RE =
-  /^[A-Za-z0-9][A-Za-z0-9_./:@+-]{1,120}$/;
+  /^[A-Za-z0-9][A-Za-z0-9_./:@+-]{0,119}$/;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -44,7 +53,7 @@ function uniquePreserveOrder(ids: string[]): string[] {
 
 function looksLikeModelId(s: string): boolean {
   const t = s.trim();
-  if (!t || t.length > 120) return false;
+  if (!t || t.length > MODEL_ID_MAX_LEN) return false;
   // Reject help/usage noise
   if (/^(usage|options|flags|commands|help|error|warning)\b/i.test(t)) {
     return false;
@@ -98,6 +107,7 @@ export function modelsFromJsonValue(value: unknown): string[] {
 /**
  * Parse model identifiers from CLI stdout/stderr.
  * Supports JSON arrays/objects and plain line lists (e.g. `provider/model`).
+ * Markdown bullets (`- id`, `* id`, `• id`) are stripped before tokenization.
  */
 export function parseModelListFromText(text: string): string[] {
   if (!text || text.trim().length === 0) return [];
@@ -117,7 +127,7 @@ export function parseModelListFromText(text: string): string[] {
 
   const fromLines: string[] = [];
   for (const line of text.split(/\r?\n/)) {
-    const raw = line.trim();
+    let raw = line.trim();
     if (!raw) continue;
 
     // JSON line
@@ -132,13 +142,16 @@ export function parseModelListFromText(text: string): string[] {
       }
     }
 
+    // Strip list markers from the full line before tokenizing
+    // (e.g. "- anthropic/claude-sonnet-4", "* provider/model").
+    raw = raw.replace(/^[-*•]\s+/, "");
+    if (!raw) continue;
+
     // Tab/column: take first token if it looks like a model id
     // e.g. "anthropic/claude-sonnet-4  context=200k"
     const first = raw.split(/\s+/)[0] ?? "";
-    // Strip common list bullets
-    const cleaned = first.replace(/^[-*•]\s*/, "");
-    if (looksLikeModelId(cleaned)) {
-      fromLines.push(cleaned);
+    if (looksLikeModelId(first)) {
+      fromLines.push(first);
     }
   }
 
@@ -146,7 +159,19 @@ export function parseModelListFromText(text: string): string[] {
 }
 
 /**
- * Fallbacks when probe is unavailable: capabilities.models, then tier_map values.
+ * Unique non-empty tier_map values (routing defaults / examples — not an
+ * exhaustive capability enumeration).
+ */
+export function modelsFromTierMap(reg: AdapterRegistration): string[] {
+  const fromTier = Object.values(reg.capabilities.tier_map).filter(
+    (v): v is string => typeof v === "string" && v.length > 0,
+  );
+  return uniquePreserveOrder(fromTier);
+}
+
+/**
+ * Configured models when non-empty; otherwise [].
+ * Does **not** invent tier_map ids — use {@link resolveModelList} for probes.
  */
 export function modelsFromRegistration(
   reg: AdapterRegistration,
@@ -154,10 +179,7 @@ export function modelsFromRegistration(
   if (reg.capabilities.models.length > 0) {
     return [...reg.capabilities.models];
   }
-  const fromTier = Object.values(reg.capabilities.tier_map).filter(
-    (v): v is string => typeof v === "string" && v.length > 0,
-  );
-  return uniquePreserveOrder(fromTier);
+  return [];
 }
 
 /**
@@ -193,7 +215,12 @@ export async function probeModelList(
 
 /**
  * Resolve listModels for an adapter registration.
- * Order: configured capabilities.models → live probe → tier_map values.
+ *
+ * 1. `capabilities.models` when non-empty (authoritative)
+ * 2. Live probe when `models_args` is set (and not skip_probe)
+ * 3. Unique `tier_map` values **only** if `models_args` was configured
+ *    (routing examples after empty probe — not an allowlist)
+ * 4. Otherwise `[]` (unspecified; CLIs accept many ids beyond defaults)
  */
 export async function resolveModelList(
   reg: AdapterRegistration,
@@ -203,9 +230,18 @@ export async function resolveModelList(
   if (reg.capabilities.models.length > 0) {
     return [...reg.capabilities.models];
   }
-  if (!options.skip_probe) {
+
+  const hasModelsArgs = Boolean(modelsArgs && modelsArgs.length > 0);
+
+  if (hasModelsArgs && !options.skip_probe) {
     const probed = await probeModelList(reg, modelsArgs, options);
     if (probed.length > 0) return probed;
   }
-  return modelsFromRegistration(reg);
+
+  // Soft fallback only when a probe was configured (examples after miss).
+  if (hasModelsArgs) {
+    return modelsFromTierMap(reg);
+  }
+
+  return [];
 }

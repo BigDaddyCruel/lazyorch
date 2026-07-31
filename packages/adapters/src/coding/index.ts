@@ -32,8 +32,10 @@ export {
   parseModelListFromText,
   modelsFromJsonValue,
   modelsFromRegistration,
+  modelsFromTierMap,
   probeModelList,
   resolveModelList,
+  MODEL_ID_MAX_LEN,
   type ModelListProbeOptions,
 } from "./models-probe.js";
 

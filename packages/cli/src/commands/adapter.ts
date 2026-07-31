@@ -5,6 +5,9 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   AdapterRegistry,
+  getUserAdapterTemplate,
+  isUserAdapterTemplateId,
+  userTemplateToRegistryEntry,
   type AdapterHealthRow,
   type AdapterRegistration,
   type HealthMatrix,
@@ -34,6 +37,16 @@ export interface AdapterCommandOptions {
   startTemplate?: string;
   /** JSON capabilities blob for register. */
   capabilitiesJson?: string;
+  /**
+   * Model-list probe argv for register (CSV or JSON array string).
+   * e.g. `models` or `models,list` or `["models"]`.
+   */
+  modelsArgs?: string;
+  /**
+   * Seed register from USER_ADAPTER_TEMPLATES id (`aider` | `opencode`).
+   * Supplies binary, start_template, models_args, capabilities when not overridden.
+   */
+  fromTemplate?: string;
   /** When true, list only enabled. */
   enabledOnly?: boolean;
   /**
@@ -45,6 +58,23 @@ export interface AdapterCommandOptions {
   skipProbe?: boolean;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
+}
+
+/** Parse --models-args: JSON array, or comma/space-separated tokens. */
+export function parseModelsArgsFlag(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[")) {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === "string")) {
+      throw new Error("--models-args JSON must be an array of strings");
+    }
+    return parsed as string[];
+  }
+  return trimmed
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 export interface AdapterCommandResult {
@@ -176,18 +206,44 @@ async function registerAdapter(
   options: AdapterCommandOptions,
   stdout: NodeJS.WritableStream,
 ): Promise<AdapterCommandResult> {
-  const id = options.id?.trim();
+  const fromTemplateRaw = options.fromTemplate?.trim();
+  let seeded: AdapterRegistryEntry | undefined;
+  if (fromTemplateRaw) {
+    if (!isUserAdapterTemplateId(fromTemplateRaw)) {
+      throw new Error(
+        `unknown --from-template "${fromTemplateRaw}" (known: aider, opencode)`,
+      );
+    }
+    const tmpl = getUserAdapterTemplate(fromTemplateRaw);
+    if (!tmpl) {
+      throw new Error(`template "${fromTemplateRaw}" not found`);
+    }
+    seeded = userTemplateToRegistryEntry(tmpl);
+    stdout.write(
+      `using template ${fromTemplateRaw}: binary=${seeded.binary} start_template set` +
+        (seeded.models_args
+          ? ` models_args=${JSON.stringify(seeded.models_args)}`
+          : "") +
+        "\n",
+    );
+  }
+
+  const id = (options.id?.trim() || seeded?.id || "").trim();
   if (!id) {
-    throw new Error("adapter register requires --id <id>");
+    throw new Error(
+      "adapter register requires --id <id> or --from-template <aider|opencode>",
+    );
   }
   if (id === "shell") {
     throw new Error(
       'adapter id "shell" is reserved for the deterministic shell adapter; cannot register',
     );
   }
-  const binary = options.binary?.trim();
+  const binary = (options.binary?.trim() || seeded?.binary || "").trim();
   if (!binary) {
-    throw new Error("adapter register requires --binary <path-or-name>");
+    throw new Error(
+      "adapter register requires --binary <path-or-name> or --from-template",
+    );
   }
 
   const { config, configPath } = await loadConfig(repo);
@@ -195,7 +251,8 @@ async function registerAdapter(
   const builtinIds = new Set(["claude", "codex", "agy", "grok"]);
   const isBuiltin = builtinIds.has(id);
 
-  let capabilities: AdapterRegistryEntry["capabilities"];
+  let capabilities: AdapterRegistryEntry["capabilities"] =
+    seeded?.capabilities;
   if (options.capabilitiesJson) {
     try {
       capabilities = JSON.parse(
@@ -206,6 +263,22 @@ async function registerAdapter(
     }
   }
 
+  let models_args: string[] | undefined = seeded?.models_args
+    ? [...seeded.models_args]
+    : undefined;
+  if (options.modelsArgs !== undefined) {
+    try {
+      models_args = parseModelsArgsFlag(options.modelsArgs);
+    } catch (err) {
+      throw new Error(
+        err instanceof Error ? err.message : "--models-args invalid",
+      );
+    }
+  }
+
+  const start_template =
+    options.startTemplate ?? seeded?.start_template ?? undefined;
+
   const entryInput: Record<string, unknown> = {
     id,
     binary,
@@ -213,11 +286,18 @@ async function registerAdapter(
     source: "user_config",
   };
   if (options.displayName) entryInput.display_name = options.displayName;
-  if (options.startTemplate) entryInput.start_template = options.startTemplate;
+  else if (seeded?.display_name) entryInput.display_name = seeded.display_name;
+  if (start_template) entryInput.start_template = start_template;
   if (capabilities) entryInput.capabilities = capabilities;
+  if (models_args && models_args.length > 0) {
+    entryInput.models_args = models_args;
+  }
+  if (seeded?.version_args) entryInput.version_args = seeded.version_args;
+  if (seeded?.candidates) entryInput.candidates = seeded.candidates;
+  if (seeded?.args_prefix) entryInput.args_prefix = seeded.args_prefix;
 
   // Non-builtin without start_template cannot be started via createAdapter.
-  if (!isBuiltin && !options.startTemplate) {
+  if (!isBuiltin && !start_template) {
     stdout.write(
       `warn: no --start-template for "${id}"; adapter will be discoverable but not startable until a template is set\n`,
     );

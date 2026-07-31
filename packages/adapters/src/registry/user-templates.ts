@@ -12,11 +12,24 @@
  * ## Via CLI
  *
  * ```bash
+ * # Seed from a built-in example template (binary/start_template/models_args):
+ * lazyorch adapter register --from-template aider
+ * lazyorch adapter register --from-template opencode
+ *
+ * # Or hand-roll:
  * lazyorch adapter register \
  *   --id aider \
  *   --binary aider \
- *   --display-name Aider \
- *   --start-template "{binary} --model {model} --yes-always --message-file {prompt_file}"
+ *   --name Aider \
+ *   --start-template "{binary} --model {model} --yes-always --message-file {prompt_file}" \
+ *   --models-args "[]"
+ *
+ * # OpenCode uses positional message text via {prompt} (file contents):
+ * lazyorch adapter register \
+ *   --id opencode \
+ *   --binary opencode \
+ *   --start-template "{binary} run --model {model} --auto {prompt}" \
+ *   --models-args models
  *
  * lazyorch adapter test --id aider
  * lazyorch adapter list --probe
@@ -48,6 +61,7 @@
  * | `{binary}`      | Resolved executable                        |
  * | `{model}`       | Concrete model id from router              |
  * | `{prompt_file}` | Absolute path to session `prompt.md`       |
+ * | `{prompt}`      | **Contents** of prompt.md (whole argv)     |
  * | `{cwd}`         | Session working directory (worktree/root)  |
  * | `{session_dir}` | Session directory under runs/…/sessions    |
  * | `{timeout_ms}`  | Session timeout                            |
@@ -55,19 +69,26 @@
  * | `{agent_id}`    | Agent id when present                      |
  * | `{task_id}`     | Task id when present                       |
  *
- * Templates are tokenized **before** substitution so paths with spaces stay
- * single argv entries (see `templateToArgv` in generic.ts).
+ * Prefer `{prompt_file}` when the CLI has a message-file flag (aider).
+ * Prefer whole-token `{prompt}` when the CLI takes the user message as a
+ * **positional** argv (opencode `run [message..]`). Do **not** use `--file`
+ * for OpenCode as the message — `--file` only attaches files to a message.
+ *
+ * Templates are tokenized **before** substitution so paths (and multi-line
+ * `{prompt}`) stay single argv entries (see `templateToArgv` in generic.ts).
  *
  * ## models_args (optional model-list probe)
  *
  * When the CLI can list models non-interactively, set `models_args` so
- * `listModels()` can probe (e.g. opencode: `["models"]`). If omitted or the
- * probe fails, LazyOrch uses `capabilities.models` or unique `tier_map` values.
+ * `listModels()` can probe (e.g. opencode: `["models"]`). Configured
+ * `capabilities.models` always wins. When models_args is set but the probe
+ * is empty, unique `tier_map` values are soft routing examples only — not an
+ * allowlist. With neither models nor models_args, listModels returns [].
  *
  * ## Copy a template
  *
  * Use {@link USER_ADAPTER_TEMPLATES} / {@link getUserAdapterTemplate} /
- * {@link userTemplateToRegistryEntry} to seed config programmatically.
+ * {@link userTemplateToRegistryEntry} / CLI `--from-template` to seed config.
  */
 
 import type { AdapterRegistryEntry } from "@lazyorch/shared";
@@ -87,7 +108,8 @@ export interface UserAdapterTemplate {
   candidates?: string[];
   /**
    * Argv template for GenericCliAdapter.start.
-   * Prefer `{binary}` + file-based prompt flags so Windows paths stay intact.
+   * Prefer `{prompt_file}` for path flags; whole-token `{prompt}` for
+   * positional message CLIs (content loaded at start).
    */
   start_template: string;
   version_args?: string[];
@@ -99,14 +121,27 @@ export interface UserAdapterTemplate {
   notes?: string;
 }
 
+function freezeTemplate(t: UserAdapterTemplate): UserAdapterTemplate {
+  if (t.capabilities) {
+    Object.freeze(t.capabilities);
+    if (t.capabilities.tier_map) Object.freeze(t.capabilities.tier_map);
+    if (t.capabilities.models) Object.freeze(t.capabilities.models);
+  }
+  if (t.candidates) Object.freeze(t.candidates);
+  if (t.models_args) Object.freeze(t.models_args);
+  if (t.args_prefix) Object.freeze(t.args_prefix);
+  return Object.freeze(t);
+}
+
 /**
  * Built-in example templates: **aider** and **opencode**.
  * These are documentation + convenience seeds — not first-class builtins.
+ * Nested objects are frozen; getters return clones.
  */
 export const USER_ADAPTER_TEMPLATES: Readonly<
   Record<string, UserAdapterTemplate>
-> = {
-  aider: {
+> = Object.freeze({
+  aider: freezeTemplate({
     id: "aider",
     display_name: "Aider",
     binary: "aider",
@@ -129,17 +164,18 @@ export const USER_ADAPTER_TEMPLATES: Readonly<
     }),
     notes:
       "Generic template. Aider has no LazyOrch usage parse; install aider on PATH or set binary to an absolute path. Adjust --model ids to match your provider config.",
-  },
-  opencode: {
+  }),
+  opencode: freezeTemplate({
     id: "opencode",
     display_name: "OpenCode",
     binary: "opencode",
     candidates: ["opencode"],
     version_args: ["--version"],
-    // Non-interactive run; --file attaches the materialized prompt; --auto skips prompts.
+    // Non-interactive: `opencode run [message..]` — message is positional.
+    // {prompt} expands to prompt.md **contents** as a single argv entry.
+    // Do NOT use --file for the message; --file only attaches extra files.
     // https://opencode.ai/docs/cli/
-    start_template:
-      "{binary} run --model {model} --auto --file {prompt_file}",
+    start_template: "{binary} run --model {model} --auto {prompt}",
     // Native model list: `opencode models` → provider/model lines
     models_args: ["models"],
     capabilities: codingCapabilities({
@@ -154,11 +190,38 @@ export const USER_ADAPTER_TEMPLATES: Readonly<
       },
     }),
     notes:
-      "Generic template. `models_args: [models]` enables listModels probe when the binary is bound. Model ids use provider/model form; tune tier_map to your auth providers.",
-  },
-} as const;
+      "Generic template. Message is positional via {prompt} (file contents). models_args: [models] enables listModels probe. Model ids use provider/model form; tune tier_map to your auth providers.",
+  }),
+});
 
 export type UserAdapterTemplateId = keyof typeof USER_ADAPTER_TEMPLATES;
+
+function cloneTemplate(t: UserAdapterTemplate): UserAdapterTemplate {
+  return {
+    id: t.id,
+    display_name: t.display_name,
+    binary: t.binary,
+    start_template: t.start_template,
+    ...(t.candidates ? { candidates: [...t.candidates] } : {}),
+    ...(t.version_args ? { version_args: [...t.version_args] } : {}),
+    ...(t.models_args ? { models_args: [...t.models_args] } : {}),
+    ...(t.args_prefix ? { args_prefix: [...t.args_prefix] } : {}),
+    ...(t.notes ? { notes: t.notes } : {}),
+    ...(t.capabilities
+      ? {
+          capabilities: {
+            ...t.capabilities,
+            ...(t.capabilities.models
+              ? { models: [...t.capabilities.models] }
+              : {}),
+            ...(t.capabilities.tier_map
+              ? { tier_map: { ...t.capabilities.tier_map } }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
 
 export function isUserAdapterTemplateId(
   id: string,
@@ -166,15 +229,19 @@ export function isUserAdapterTemplateId(
   return Object.prototype.hasOwnProperty.call(USER_ADAPTER_TEMPLATES, id);
 }
 
+/** Clone of a built-in template (safe to mutate). */
 export function getUserAdapterTemplate(
   id: string,
 ): UserAdapterTemplate | undefined {
   if (!isUserAdapterTemplateId(id)) return undefined;
-  return USER_ADAPTER_TEMPLATES[id];
+  const t = USER_ADAPTER_TEMPLATES[id];
+  if (!t) return undefined;
+  return cloneTemplate(t);
 }
 
+/** Clones of all built-in templates. */
 export function listUserAdapterTemplates(): UserAdapterTemplate[] {
-  return Object.values(USER_ADAPTER_TEMPLATES).map((t) => ({ ...t }));
+  return Object.values(USER_ADAPTER_TEMPLATES).map(cloneTemplate);
 }
 
 /**
