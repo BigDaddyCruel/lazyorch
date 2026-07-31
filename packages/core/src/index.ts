@@ -8,6 +8,7 @@
  * PR-13: team manager, skills, preferred_adapters, role-template matching.
  * PR-14: shared run context KV (context.json + write ACL).
  * PR-15: planning handlers + multi-adapter sessions + plan gates.
+ * PR-16: Implementing phase (assign/review/integrate, forge mutex, escalate).
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
 
@@ -399,6 +400,56 @@ export {
   type CanStartReviewerInput,
   type CanStartQaInput,
 } from "./team/index.js";
+
+export {
+  ImplementingError,
+  isIntegrateConflictRework,
+  applyWorkerOutcome,
+  applyReviewDecision,
+  applyIntegrateResult,
+  recoverIntegrateConflict,
+  afterConflictRework,
+  integrateOne,
+  drainIntegrateQueue,
+  sortIntegratingQueue,
+  terminalFailedTasks,
+  coveredByPendingIntervention,
+  applyTerminalFailedPolicy,
+  createHumanInterventionGate,
+  applyConflictStormPolicy,
+  implementingTick,
+  prepareImplementingReplan,
+  resumeImplementingAfterReplan,
+  FakeIntegrationMutex,
+  FakeForgeIntegrate,
+  FakeWorkerSession,
+  FakeReviewerSession,
+  type WorkerOutcomeKind,
+  type WorkerSessionRequest,
+  type WorkerSessionOutcome,
+  type WorkerSessionPort,
+  type ReviewDecision,
+  type ReviewerSessionRequest,
+  type ReviewerSessionOutcome,
+  type ReviewerSessionPort,
+  type ForgeIntegrateStatus,
+  type ForgeIntegrateRequest,
+  type ForgeIntegrateResult,
+  type ForgeIntegratePort,
+  type IntegrationMutexAcquireResult,
+  type IntegrationMutexPort,
+  type ApplyIntegrateResult,
+  type RecoverIntegrateConflictResult,
+  type IntegrateOneParams,
+  type IntegrateOneResult,
+  type OnTaskTerminalFailed,
+  type HumanInterventionReason,
+  type TerminalFailedPolicy,
+  type TerminalFailedResult,
+  type CreateHumanInterventionGateOpts,
+  type ImplementingTickParams,
+  type ImplementingTickResult,
+} from "./implementing/index.js";
 
 export {
   BUILTIN_SKILL_IDS,

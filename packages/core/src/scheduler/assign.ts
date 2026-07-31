@@ -170,6 +170,17 @@ function buildRouteInput(
   if (task.adapter_override === "shell") {
     input.session_kind = "deterministic";
   }
+  // Escalate on retry (KD-42): prior quality fails + last tier seed nextTier max.
+  // attempt is 1-based; after failed→ready or requeue, attempt ≥ 2 means ≥1 fail.
+  const priorFails = Math.max(0, task.attempt - 1);
+  if (priorFails > 0) {
+    input.escalate = {
+      consecutive_quality_fails: priorFails,
+      ...(task.last_model_tier !== undefined
+        ? { last_model_tier: task.last_model_tier }
+        : {}),
+    };
+  }
   return input;
 }
 
