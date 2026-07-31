@@ -10,6 +10,7 @@
  * PR-15: planning handlers + multi-adapter sessions + plan gates.
  * PR-16: Implementing phase (assign/review/integrate, forge mutex, escalate).
  * PR-17: Run-level QA + PrePR/CILoop/MergeReady lifecycle + merge gate.
+ * PR-18: Full budget/cost + recovery polish (model_rates, usage, pressure, restarts).
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
 
@@ -251,6 +252,11 @@ export {
   MODEL_ROUTED_EVENT,
   // dry-run
   dryRunRoute,
+  // budget pressure helpers (PR-18; also under ./budget)
+  evaluateBudget,
+  isBudgetPressure,
+  isBudgetExhausted,
+  usageSnapshotFrom,
   type ComplexitySignals,
   type SessionKind,
   type RouteReason,
@@ -270,7 +276,32 @@ export {
   type PickAdapterResult,
   type DryRunRouteParams,
   type DryRunRouteResult,
+  type BudgetEvaluation,
+  type BudgetLimitsView,
+  type BudgetPressureThresholds,
+  type BudgetUsageSnapshot,
 } from "./models/index.js";
+
+export {
+  // model rates + usage aggregation + pressure (PR-18)
+  DEFAULT_MODEL_RATES,
+  DEFAULT_TIER_RATES,
+  mergeModelRates,
+  lookupModelRate,
+  resolveRate,
+  estimateUsdFromTokens,
+  resolveEstimatedUsd,
+  aggregateUsage,
+  mergeAggregatedUsage,
+  EMPTY_AGGREGATED_USAGE,
+  type ModelRate as BudgetModelRate,
+  type ModelRatesTable,
+  type SessionUsage,
+  type AggregatedUsage,
+  type AggregateUsageOptions,
+  type BudgetExhaustReason,
+  type BudgetPressureReason,
+} from "./budget/index.js";
 
 export {
   // slots
@@ -308,6 +339,7 @@ export {
   filterDrainHandlesAfterAssign,
   isStillDrainable,
   applyAssignToSessions,
+  resolveTickBudgetSignals,
   schedulerTick,
   schedulerTickAsync,
   defaultSchedulerConfig,
@@ -341,6 +373,7 @@ export {
   type AssignBatchResult,
   type SchedulerConfig,
   type SchedulerRuntimeState,
+  type SchedulerBudgetInput,
 } from "./scheduler/index.js";
 
 export {
@@ -381,6 +414,20 @@ export {
   canStartReviewerSession,
   canStartQaSession,
   withinRestartBudget,
+  // restart policies (PR-18)
+  RESTART_COUNTABLE_STATUSES,
+  CLEAN_EXIT_STATUSES,
+  isRestartCountableStatus,
+  isCleanExitStatus,
+  countsTowardRestartBudget,
+  RestartBudgetTracker,
+  ephemeralPolicyFromConfig,
+  defaultMaxRestartsPerHour,
+  canRestartLead,
+  canRestartReviewer,
+  canRestartQa,
+  decideEphemeralRestart,
+  RoleRestartRegistry,
   // team manager
   buildTeam,
   mintWorkerAgent,
@@ -400,6 +447,16 @@ export {
   type IdleExitInput,
   type CanStartReviewerInput,
   type CanStartQaInput,
+  type RestartRole,
+  type RestartCountableStatus,
+  type RestartEvent,
+  type RestartBudgetTrackerOptions,
+  type RoleRestartConfig,
+  type CanRestartLeadInput,
+  type CanRestartReviewerInput,
+  type CanRestartQaInput,
+  type RoleRestartRegistryOptions,
+  type RoleRestartDecision,
 } from "./team/index.js";
 
 export {

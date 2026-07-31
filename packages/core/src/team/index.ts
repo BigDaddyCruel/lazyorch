@@ -64,6 +64,35 @@ export {
 } from "./ephemeral.js";
 
 export {
+  RESTART_COUNTABLE_STATUSES,
+  CLEAN_EXIT_STATUSES,
+  isRestartCountableStatus,
+  isCleanExitStatus,
+  countsTowardRestartBudget,
+  RestartBudgetTracker,
+  ephemeralPolicyFromConfig,
+  defaultMaxRestartsPerHour,
+  canRestartLead,
+  canRestartReviewer,
+  canRestartQa,
+  decideEphemeralRestart,
+  type RestartRole,
+  type RestartCountableStatus,
+  type RestartEvent,
+  type RestartBudgetTrackerOptions,
+  type RoleRestartConfig,
+  type CanRestartLeadInput,
+  type CanRestartReviewerInput,
+  type CanRestartQaInput,
+} from "./restart-policy.js";
+
+export {
+  RoleRestartRegistry,
+  type RoleRestartRegistryOptions,
+  type RoleRestartDecision,
+} from "./restart-registry.js";
+
+export {
   buildTeam,
   mintWorkerAgent,
   mintPlanAgent,

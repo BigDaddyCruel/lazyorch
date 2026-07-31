@@ -25,6 +25,7 @@ export {
   ProjectMetaConfigSchema,
   WorkspaceConfigSchema,
   ForgeConfigSchema,
+  ModelRateSchema,
   BudgetConfigSchema,
   ShellConfigSchema,
   ContextConfigSchema,
@@ -42,6 +43,8 @@ export {
   type ReserveSlotsConfig,
   type TeamConfig,
   type GatesConfig,
+  type ModelRate,
+  type BudgetConfig,
   type LazyorchConfig,
   type LazyorchConfigInput,
 } from "./schema.js";

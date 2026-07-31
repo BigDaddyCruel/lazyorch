@@ -15,6 +15,13 @@
  */
 
 import type { ElasticityConfig, SchedulingConfig } from "@lazyorch/shared";
+import {
+  evaluateBudget,
+  type BudgetEvaluation,
+  type BudgetLimitsView,
+  type BudgetPressureThresholds,
+  type BudgetUsageSnapshot,
+} from "../budget/index.js";
 import { getRoleTemplate } from "../team/role-templates.js";
 import type { RunPhase } from "../types/run.js";
 import type { Task } from "../types/task.js";
@@ -49,6 +56,21 @@ import type {
   WorktreePort,
 } from "./types.js";
 
+/**
+ * Optional live budget view for a scheduler tick (PR-18).
+ * When provided, evaluates pressure + exhaustion and wires:
+ * - budget_exhausted → elasticity desired=0 + max_assign drain
+ * - budget_pressure → routeModel budget_tier_cap (via routing)
+ *
+ * Explicit `budget_exhausted` / `routing.budget_pressure` on the tick
+ * still win when set (override evaluateBudget).
+ */
+export interface SchedulerBudgetInput {
+  limits: BudgetLimitsView;
+  usage: BudgetUsageSnapshot;
+  thresholds?: BudgetPressureThresholds;
+}
+
 export interface SchedulerTickInput {
   tasks: readonly Task[];
   phase: RunPhase;
@@ -61,6 +83,11 @@ export interface SchedulerTickInput {
   now_ms?: number;
   host?: HostPressure;
   budget_exhausted?: boolean;
+  /**
+   * Live budget tracker snapshot + limits. When set, derives
+   * budget_exhausted and routing.budget_pressure unless already explicit.
+   */
+  budget?: SchedulerBudgetInput;
   /** Freeze pool size both up and down (conflict storm). */
   pause_elasticity?: boolean;
   skip_scope_lock_task_ids?: ReadonlySet<string>;
@@ -76,6 +103,8 @@ export interface SchedulerTickResult {
   runtime: SchedulerRuntimeState;
   usage: ReturnType<typeof computeSlotUsage>;
   free_for_workers: number;
+  /** Present when `budget` was supplied (or explicit exhausted without budget). */
+  budget_eval?: BudgetEvaluation;
 }
 
 function limitsFrom(config: SchedulerConfig): SlotLimits {
@@ -406,11 +435,60 @@ function applyDrain(
   });
 }
 
+/**
+ * Resolve budget_exhausted + routing.budget_pressure from optional budget view.
+ * Explicit tick fields take precedence over evaluateBudget.
+ */
+export function resolveTickBudgetSignals(input: {
+  budget?: SchedulerBudgetInput;
+  budget_exhausted?: boolean;
+  routing?: AssignRoutingOptions;
+}): {
+  budget_exhausted: boolean;
+  routing: AssignRoutingOptions | undefined;
+  budget_eval?: BudgetEvaluation;
+} {
+  let budget_eval: BudgetEvaluation | undefined;
+  let budget_exhausted = input.budget_exhausted === true;
+  let budget_pressure = input.routing?.budget_pressure;
+
+  if (input.budget) {
+    const evalArgs: Parameters<typeof evaluateBudget>[0] = {
+      limits: input.budget.limits,
+      usage: input.budget.usage,
+    };
+    if (input.budget.thresholds !== undefined) {
+      evalArgs.thresholds = input.budget.thresholds;
+    }
+    budget_eval = evaluateBudget(evalArgs);
+    if (input.budget_exhausted === undefined) {
+      budget_exhausted = budget_eval.budget_exhausted;
+    }
+    if (budget_pressure === undefined) {
+      budget_pressure = budget_eval.budget_pressure;
+    }
+  }
+
+  let routing = input.routing;
+  if (budget_pressure !== undefined) {
+    routing = { ...(routing ?? {}), budget_pressure };
+  }
+
+  const out: {
+    budget_exhausted: boolean;
+    routing: AssignRoutingOptions | undefined;
+    budget_eval?: BudgetEvaluation;
+  } = { budget_exhausted, routing };
+  if (budget_eval !== undefined) out.budget_eval = budget_eval;
+  return out;
+}
+
 function buildAssignOptions(
   input: SchedulerTickInput,
   limits: SlotLimits,
   now: number,
   agentSeq: { value: number },
+  routing?: AssignRoutingOptions,
 ): AssignReadyOptions {
   const opts: AssignReadyOptions = {
     tasks: input.tasks,
@@ -423,7 +501,7 @@ function buildAssignOptions(
     now_ms: now,
   };
   if (input.worktrees) opts.worktrees = input.worktrees;
-  if (input.routing) opts.routing = input.routing;
+  if (routing) opts.routing = routing;
   if (input.metrics) opts.metrics = input.metrics;
   if (input.skip_scope_lock_task_ids) {
     opts.skip_scope_lock_task_ids = input.skip_scope_lock_task_ids;
@@ -601,6 +679,13 @@ function runTickCore(
 export function schedulerTick(input: SchedulerTickInput): SchedulerTickResult {
   const now = input.now_ms ?? Date.now();
   const limits = limitsFrom(input.config);
+  const signals = resolveTickBudgetSignals({
+    ...(input.budget !== undefined ? { budget: input.budget } : {}),
+    ...(input.budget_exhausted !== undefined
+      ? { budget_exhausted: input.budget_exhausted }
+      : {}),
+    ...(input.routing !== undefined ? { routing: input.routing } : {}),
+  });
 
   const planInput: Parameters<typeof planElasticity>[0] = {
     tasks: input.tasks,
@@ -613,8 +698,8 @@ export function schedulerTick(input: SchedulerTickInput): SchedulerTickResult {
     last_scale_ms: input.runtime.last_scale_ms,
   };
   if (input.host !== undefined) planInput.host = input.host;
-  if (input.budget_exhausted !== undefined) {
-    planInput.budget_exhausted = input.budget_exhausted;
+  if (signals.budget_exhausted) {
+    planInput.budget_exhausted = true;
   }
   if (input.pause_elasticity !== undefined) {
     planInput.pause_elasticity = input.pause_elasticity;
@@ -624,23 +709,29 @@ export function schedulerTick(input: SchedulerTickInput): SchedulerTickResult {
 
   const preUsage = computeSlotUsage(input.runtime.sessions);
   const agentSeq = { value: input.runtime.agent_seq };
-  const assignOpts = buildAssignOptions(input, limits, now, agentSeq);
+  const assignOpts = buildAssignOptions(
+    input,
+    limits,
+    now,
+    agentSeq,
+    signals.routing,
+  );
 
-  // Issue 1: cap assign by desired / budget (not free slots alone)
+  // Cap assign by desired / budget (not free slots alone)
   if (input.max_assign === undefined) {
     const capInput: Parameters<typeof maxAssignTowardDesired>[0] = {
       free_for_workers,
       desired,
       active_workers: preUsage.active_workers,
     };
-    if (input.budget_exhausted !== undefined) {
-      capInput.budget_exhausted = input.budget_exhausted;
+    if (signals.budget_exhausted) {
+      capInput.budget_exhausted = true;
     }
     assignOpts.max_assign = maxAssignTowardDesired(capInput);
   }
 
   const assign = assignReadyTasks(assignOpts);
-  return runTickCore(
+  const result = runTickCore(
     input,
     assign,
     now,
@@ -649,6 +740,10 @@ export function schedulerTick(input: SchedulerTickInput): SchedulerTickResult {
     preScale,
     free_for_workers,
   );
+  if (signals.budget_eval !== undefined) {
+    result.budget_eval = signals.budget_eval;
+  }
+  return result;
 }
 
 /**
@@ -659,6 +754,13 @@ export async function schedulerTickAsync(
 ): Promise<SchedulerTickResult> {
   const now = input.now_ms ?? Date.now();
   const limits = limitsFrom(input.config);
+  const signals = resolveTickBudgetSignals({
+    ...(input.budget !== undefined ? { budget: input.budget } : {}),
+    ...(input.budget_exhausted !== undefined
+      ? { budget_exhausted: input.budget_exhausted }
+      : {}),
+    ...(input.routing !== undefined ? { routing: input.routing } : {}),
+  });
 
   const planInput: Parameters<typeof planElasticity>[0] = {
     tasks: input.tasks,
@@ -671,8 +773,8 @@ export async function schedulerTickAsync(
     last_scale_ms: input.runtime.last_scale_ms,
   };
   if (input.host !== undefined) planInput.host = input.host;
-  if (input.budget_exhausted !== undefined) {
-    planInput.budget_exhausted = input.budget_exhausted;
+  if (signals.budget_exhausted) {
+    planInput.budget_exhausted = true;
   }
   if (input.pause_elasticity !== undefined) {
     planInput.pause_elasticity = input.pause_elasticity;
@@ -682,7 +784,13 @@ export async function schedulerTickAsync(
 
   const preUsage = computeSlotUsage(input.runtime.sessions);
   const agentSeq = { value: input.runtime.agent_seq };
-  const assignOpts = buildAssignOptions(input, limits, now, agentSeq);
+  const assignOpts = buildAssignOptions(
+    input,
+    limits,
+    now,
+    agentSeq,
+    signals.routing,
+  );
 
   if (input.max_assign === undefined) {
     const capInput: Parameters<typeof maxAssignTowardDesired>[0] = {
@@ -690,14 +798,14 @@ export async function schedulerTickAsync(
       desired,
       active_workers: preUsage.active_workers,
     };
-    if (input.budget_exhausted !== undefined) {
-      capInput.budget_exhausted = input.budget_exhausted;
+    if (signals.budget_exhausted) {
+      capInput.budget_exhausted = true;
     }
     assignOpts.max_assign = maxAssignTowardDesired(capInput);
   }
 
   const assign = await assignReadyTasksAsync(assignOpts);
-  return runTickCore(
+  const result = runTickCore(
     input,
     assign,
     now,
@@ -706,6 +814,10 @@ export async function schedulerTickAsync(
     preScale,
     free_for_workers,
   );
+  if (signals.budget_eval !== undefined) {
+    result.budget_eval = signals.budget_eval;
+  }
+  return result;
 }
 
 /** Default scheduler config slices matching design defaults. */

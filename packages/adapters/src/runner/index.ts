@@ -39,12 +39,17 @@ export {
 
 export {
   BudgetHoursTracker,
+  BudgetTracker,
+  estimateUsdFromRates,
+  resolveSessionUsd,
   type BudgetHoursLimits,
+  type BudgetLimits,
   type BudgetHoursSnapshot,
   type BudgetHardStopResult,
   type BudgetStopReason,
   type BudgetHoursTrackerOptions,
   type SessionHoursEntry,
+  type SessionUsageEntry,
 } from "./budget-hours.js";
 
 export {

@@ -135,6 +135,64 @@ describe("schedulerTick", () => {
     expect(result.scale.spawn_count).toBe(0);
   });
 
+  it("budget view derives exhausted + pressure for tick (integration)", () => {
+    const locks = new FakeScopeLockManager();
+    const cfg = defaultSchedulerConfig();
+    const seenPressure: boolean[] = [];
+    const result = schedulerTick({
+      tasks: [task("p1"), task("p2"), task("p3"), task("p4")],
+      phase: "Implementing",
+      runtime: emptySchedulerRuntime(),
+      config: cfg,
+      locks,
+      now_ms: 1,
+      budget: {
+        limits: { max_agent_hours: 1, max_usd_per_run: 10 },
+        usage: {
+          agent_hours: 0.9,
+          run_hours: 0.9,
+          estimated_usd: 1,
+          usd_known: true,
+        },
+        thresholds: { budget_pressure_threshold_hours: 0.25 },
+      },
+      routing: {
+        routeFn: (input) => {
+          seenPressure.push(input.budget_pressure === true);
+          return route;
+        },
+      },
+    });
+    // Not exhausted (0.9 < 1) but pressure (remaining 0.1 < 0.25)
+    expect(result.budget_eval?.budget_pressure).toBe(true);
+    expect(result.budget_eval?.budget_exhausted).toBe(false);
+    expect(result.desired_workers).toBeGreaterThan(0);
+    expect(seenPressure.length).toBeGreaterThan(0);
+    expect(seenPressure.every(Boolean)).toBe(true);
+
+    const drained = schedulerTick({
+      tasks: [task("d1"), task("d2")],
+      phase: "Implementing",
+      runtime: emptySchedulerRuntime(),
+      config: cfg,
+      locks,
+      now_ms: 1,
+      budget: {
+        limits: { max_agent_hours: 1 },
+        usage: {
+          agent_hours: 1.5,
+          run_hours: 1.5,
+          estimated_usd: 0,
+          usd_known: false,
+        },
+      },
+      routing: { routeFn: () => route },
+    });
+    expect(drained.budget_eval?.budget_exhausted).toBe(true);
+    expect(drained.desired_workers).toBe(0);
+    expect(drained.assign.assigned).toHaveLength(0);
+  });
+
   it("does not double-claim free slots between assign and spawn", () => {
     const locks = new FakeScopeLockManager();
     const cfg = defaultSchedulerConfig();

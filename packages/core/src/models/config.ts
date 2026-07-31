@@ -46,6 +46,14 @@ export function mergeModelsConfig(
       partial.escalate_after_failures ?? base.escalate_after_failures,
     max_tier: partial.max_tier ?? base.max_tier,
     budget_tier_cap: partial.budget_tier_cap ?? base.budget_tier_cap,
+    budget_pressure_threshold_usd:
+      partial.budget_pressure_threshold_usd !== undefined
+        ? partial.budget_pressure_threshold_usd
+        : base.budget_pressure_threshold_usd,
+    budget_pressure_threshold_hours:
+      partial.budget_pressure_threshold_hours !== undefined
+        ? partial.budget_pressure_threshold_hours
+        : base.budget_pressure_threshold_hours,
     role_tier_floor: {
       ...base.role_tier_floor,
       ...(partial.role_tier_floor ?? {}),

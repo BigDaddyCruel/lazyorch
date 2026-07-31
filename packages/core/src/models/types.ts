@@ -78,6 +78,10 @@ export interface ModelsRoutingConfig {
   escalate_after_failures: number;
   max_tier: ModelTier;
   budget_tier_cap: ModelTier;
+  /** Remaining USD under which budget_tier_cap applies; null = never from USD. */
+  budget_pressure_threshold_usd: number | null;
+  /** Remaining agent-hours under which budget_tier_cap applies; null = never from hours. */
+  budget_pressure_threshold_hours: number | null;
   role_tier_floor: Record<string, ModelTier>;
   role_tier_ceiling: Record<string, ModelTier>;
   score_bands: ScoreBands;
@@ -133,6 +137,8 @@ export type PartialDeepModelsConfig = {
   escalate_after_failures?: number;
   max_tier?: ModelTier;
   budget_tier_cap?: ModelTier;
+  budget_pressure_threshold_usd?: number | null;
+  budget_pressure_threshold_hours?: number | null;
   role_tier_floor?: Record<string, ModelTier>;
   role_tier_ceiling?: Record<string, ModelTier>;
   score_bands?: Partial<ScoreBands>;

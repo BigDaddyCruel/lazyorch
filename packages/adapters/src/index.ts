@@ -55,6 +55,9 @@ export {
   readResultJsonFile,
   resultJsonPath,
   BudgetHoursTracker,
+  BudgetTracker,
+  estimateUsdFromRates,
+  resolveSessionUsd,
   sessionsFilePath,
   runSessionsDir,
   sessionDirFor,
@@ -77,11 +80,13 @@ export {
   type MapResultOptions,
   type CancelReason,
   type BudgetHoursLimits,
+  type BudgetLimits,
   type BudgetHoursSnapshot,
   type BudgetHardStopResult,
   type BudgetStopReason,
   type BudgetHoursTrackerOptions,
   type SessionHoursEntry,
+  type SessionUsageEntry,
 } from "./runner/index.js";
 
 export {

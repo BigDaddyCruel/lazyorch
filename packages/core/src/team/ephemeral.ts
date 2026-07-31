@@ -130,12 +130,18 @@ export function canStartQaSession(input: CanStartQaInput): boolean {
 }
 
 /**
- * Restart budget: true when restarts in the last hour are under the cap.
- * Caller supplies count of crash/timeout exits in the rolling hour.
+ * Restart budget: true when countable crash exits in the last hour are still
+ * within the allowed max restarts (inclusive).
+ *
+ * Semantics: `max_restarts_per_hour = N` means **N restarts allowed** after
+ * crashes. After the Nth countable exit, `restarts_last_hour === N` still
+ * allows a restart; the (N+1)th exit exhausts the budget.
+ *
+ * `max = 0` → never restart after a crash (`1 <= 0` is false).
  */
 export function withinRestartBudget(
   restarts_last_hour: number,
   max_restarts_per_hour: number,
 ): boolean {
-  return restarts_last_hour < max_restarts_per_hour;
+  return restarts_last_hour <= max_restarts_per_hour;
 }

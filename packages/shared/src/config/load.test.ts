@@ -20,9 +20,52 @@ describe("parseConfig / defaults", () => {
     expect(config.gates.merge).toBe(true);
     expect(config.gates.timeout_action).toBe("none");
     expect(config.gates.plan_reject_action).toBe("cancel");
+    expect(config.budget.model_rates).toEqual({});
+    expect(config.budget.hard_stop).toBe(true);
+    expect(config.models.budget_tier_cap).toBe("medium");
+    expect(config.models.budget_pressure_threshold_usd).toBeNull();
+    expect(config.models.budget_pressure_threshold_hours).toBe(0.25);
+    expect(config.lead.max_restarts_per_hour).toBe(3);
+    expect(config.reviewer.max_restarts_per_hour).toBe(6);
+    expect(config.qa.max_restarts_per_hour).toBe(6);
     expect(packing.ok).toBe(true);
     // Design defaults: min 7 ≤ 8 ok; peak 1+4+2+2=9 > 8 → soft warn
     expect(warnings.some((w) => w.includes("peak"))).toBe(true);
+  });
+
+  it("accepts budget.model_rates and pressure thresholds", () => {
+    const { config } = parseConfig({
+      budget: {
+        max_usd_per_run: 25,
+        max_agent_hours: 4,
+        model_rates: {
+          "claude-sonnet-4-6": { in_per_mtok: 3, out_per_mtok: 15 },
+        },
+      },
+      models: {
+        budget_pressure_threshold_usd: 2,
+        budget_pressure_threshold_hours: 0.5,
+      },
+    });
+    expect(config.budget.max_usd_per_run).toBe(25);
+    expect(config.budget.model_rates["claude-sonnet-4-6"]).toEqual({
+      in_per_mtok: 3,
+      out_per_mtok: 15,
+    });
+    expect(config.models.budget_pressure_threshold_usd).toBe(2);
+    expect(config.models.budget_pressure_threshold_hours).toBe(0.5);
+  });
+
+  it("rejects invalid model_rates shape", () => {
+    expect(() =>
+      parseConfig({
+        budget: {
+          model_rates: {
+            m1: { in_per_mtok: "nope" },
+          },
+        },
+      }),
+    ).toThrow(ConfigValidationError);
   });
 
   it("createDefaultConfig produces valid packable config", () => {

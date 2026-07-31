@@ -122,6 +122,11 @@ export interface ImplementingTickParams {
   nextGateId?: () => string;
   nextTaskId?: () => string;
   budget_exhausted?: boolean;
+  /**
+   * Live budget view (PR-18). When set, scheduler derives budget_exhausted
+   * + routing.budget_pressure via evaluateBudget unless overridden above.
+   */
+  budget?: import("../scheduler/scheduler.js").SchedulerBudgetInput;
   pause_elasticity?: boolean;
   /** Promote todo→ready when deps done (default true). */
   promote_ready?: boolean;
@@ -281,6 +286,7 @@ export async function implementingTick(
     ...(params.budget_exhausted !== undefined
       ? { budget_exhausted: params.budget_exhausted }
       : {}),
+    ...(params.budget !== undefined ? { budget: params.budget } : {}),
     ...(params.pause_elasticity !== undefined
       ? { pause_elasticity: params.pause_elasticity }
       : {}),

@@ -83,3 +83,18 @@ export {
   type DryRunRouteParams,
   type DryRunRouteResult,
 } from "./dry-run.js";
+
+/**
+ * Budget pressure flag for routeModel from evaluateBudget (PR-18).
+ * Prefer core/budget evaluateBudget; this re-exports for models consumers.
+ */
+export {
+  evaluateBudget,
+  isBudgetPressure,
+  isBudgetExhausted,
+  usageSnapshotFrom,
+  type BudgetEvaluation,
+  type BudgetLimitsView,
+  type BudgetPressureThresholds,
+  type BudgetUsageSnapshot,
+} from "../budget/index.js";
