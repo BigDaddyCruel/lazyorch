@@ -134,6 +134,49 @@ describe("integrateOne (KD-33/34)", () => {
     expect(forge.calls).toHaveLength(0);
     expect(r.task.status).toBe("integrating");
   });
+
+  it("hard integrate error under max requeues to ready and keeps locks", async () => {
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate([
+      { status: "error", error_message: "network" },
+    ]);
+    const locks = new FakeScopeLockManager();
+    locks.tryAcquire("tsk_a", ["src/a/**"]);
+
+    const r = await integrateOne({
+      run: run(),
+      task: task({
+        id: "tsk_a",
+        status: "integrating",
+        attempt: 1,
+        max_attempts: 3,
+      }),
+      forge,
+      mutex,
+      locks,
+    });
+
+    expect(r.task.status).toBe("ready");
+    expect(r.task.attempt).toBe(2);
+    expect(r.mutex_released).toBe(true);
+    expect(r.scope_locks_released).toBe(false);
+    expect(locks.isHolder("tsk_a")).toBe(true);
+  });
+
+  it("releases mutex in finally even if apply would fail path", async () => {
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate([
+      { status: "ok", feature_tip_sha: "x" },
+    ]);
+    const r = await integrateOne({
+      run: run(),
+      task: task({ id: "tsk_a", status: "integrating" }),
+      forge,
+      mutex,
+    });
+    expect(r.mutex_released).toBe(true);
+    expect(mutex.isHeld(run().id)).toBe(false);
+  });
 });
 
 describe("drainIntegrateQueue", () => {

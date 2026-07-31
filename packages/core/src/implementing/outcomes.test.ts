@@ -6,6 +6,7 @@ import {
   applyReviewDecision,
   applyWorkerOutcome,
   ImplementingError,
+  isIntegrateConflictRework,
   recoverIntegrateConflict,
 } from "./outcomes.js";
 
@@ -41,12 +42,32 @@ describe("applyWorkerOutcome", () => {
     expect(next.status).toBe("review");
   });
 
-  it("submit with material_product_change false → integrating", () => {
+  it("normal submit with material_product_change false stays in review", () => {
+    // Issue 1: without integrate_error, cannot skip review
     const next = applyWorkerOutcome(t({ id: "tsk_a", status: "in_progress" }), {
       kind: "submit_for_review",
       material_product_change: false,
     });
+    expect(next.status).toBe("review");
+    expect(isIntegrateConflictRework(t({ id: "tsk_a", status: "in_progress" }))).toBe(
+      false,
+    );
+  });
+
+  it("conflict rework + material_product_change false → integrating", () => {
+    const next = applyWorkerOutcome(
+      t({
+        id: "tsk_a",
+        status: "in_progress",
+        integrate_error: "merge conflict in src/a.ts",
+      }),
+      {
+        kind: "submit_for_review",
+        material_product_change: false,
+      },
+    );
     expect(next.status).toBe("integrating");
+    expect(next.integrate_error).toBeUndefined();
   });
 
   it("timeout requeues with attempt++ under max", () => {
@@ -133,19 +154,31 @@ describe("applyIntegrateResult (KD-33/34)", () => {
     expect(r.release_mutex).toBe(true);
   });
 
-  it("error → failed and release locks", () => {
+  it("hard error under max_attempts → ready requeue, keep locks", () => {
     const r = applyIntegrateResult(
-      t({ id: "tsk_a", status: "integrating" }),
+      t({ id: "tsk_a", status: "integrating", attempt: 1, max_attempts: 3 }),
+      { status: "error", error_message: "boom" },
+    );
+    expect(r.task.status).toBe("ready");
+    expect(r.task.attempt).toBe(2);
+    expect(r.task.integrate_error).toBe("boom");
+    expect(r.release_scope_locks).toBe(false);
+  });
+
+  it("hard error at max_attempts → terminal failed, release locks", () => {
+    const r = applyIntegrateResult(
+      t({ id: "tsk_a", status: "integrating", attempt: 3, max_attempts: 3 }),
       { status: "error", error_message: "boom" },
     );
     expect(r.task.status).toBe("failed");
+    expect(r.task.attempt).toBe(3);
     expect(r.release_scope_locks).toBe(true);
   });
 });
 
 describe("recoverIntegrateConflict", () => {
   it("blocked/integrate_conflict → ready with attempt++", () => {
-    const next = recoverIntegrateConflict(
+    const r = recoverIntegrateConflict(
       t({
         id: "tsk_a",
         status: "blocked",
@@ -154,9 +187,28 @@ describe("recoverIntegrateConflict", () => {
         attempt: 1,
       }),
     );
-    expect(next.status).toBe("ready");
-    expect(next.attempt).toBe(2);
-    expect(next.blocked_reason).toBeUndefined();
+    expect(r.recovered).toBe(true);
+    expect(r.storm).toBe(false);
+    expect(r.task.status).toBe("ready");
+    expect(r.task.attempt).toBe(2);
+    expect(r.task.blocked_reason).toBeUndefined();
+    expect(r.task.integrate_error).toBe("CONFLICT");
+  });
+
+  it("at max_attempts does not recover (storm)", () => {
+    const blocked = t({
+      id: "tsk_a",
+      status: "blocked",
+      blocked_reason: "integrate_conflict",
+      integrate_error: "CONFLICT",
+      attempt: 3,
+      max_attempts: 3,
+    });
+    const r = recoverIntegrateConflict(blocked);
+    expect(r.recovered).toBe(false);
+    expect(r.storm).toBe(true);
+    expect(r.task.status).toBe("blocked");
+    expect(r.task.blocked_reason).toBe("integrate_conflict");
   });
 
   it("rejects other blocked reasons", () => {

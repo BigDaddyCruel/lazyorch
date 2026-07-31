@@ -25,9 +25,23 @@ export class ImplementingError extends Error {
 }
 
 /**
+ * True when this task is reworking after an integrate conflict (KD-34).
+ * Marker-only review bypass is allowed only in this context.
+ */
+export function isIntegrateConflictRework(task: Task): boolean {
+  return (
+    task.integrate_error !== undefined &&
+    task.integrate_error !== null &&
+    task.integrate_error !== ""
+  );
+}
+
+/**
  * Apply worker session outcome to an in_progress task.
  *
- * - submit_for_review → review (or integrating after conflict-only rework)
+ * - submit_for_review → review
+ * - submit + material_product_change false **and** conflict rework → integrating
+ *   (skip full code review; KD-34 only)
  * - fail / error / timeout / stall → ready (requeue, attempt++) or failed
  * - requeue → ready with attempt++
  */
@@ -48,9 +62,12 @@ export function applyWorkerOutcome(
         ? [...task.artifacts, ...outcome.artifacts]
         : task.artifacts;
 
-    // Marker-only conflict rework (KD-34): skip full code review via
-    // in_progress → review → integrating (no direct in_progress→integrating edge).
-    if (outcome.material_product_change === false) {
+    // KD-34: marker-only skip-review only after integrate_conflict rework
+    // (task still carries integrate_error from the blocked conflict path).
+    if (
+      outcome.material_product_change === false &&
+      isIntegrateConflictRework(task)
+    ) {
       const reviewed = transitionTaskStatus(task, "review", {
         clear_blocked: true,
         needs_re_review: false,
@@ -86,8 +103,7 @@ export function applyWorkerOutcome(
       });
     }
     if (canRetry && outcome.kind === "fail") {
-      // Quality fail: requeue when under max (attempt++ on failed→ready path
-      // goes via failed first only at exhaustion; design: attempt++ then requeue)
+      // Quality fail: requeue when under max (attempt++ via failed→ready)
       const failed = transitionTaskStatus(task, "failed");
       if (failed.attempt < failed.max_attempts) {
         return transitionTaskStatus(failed, "ready");
@@ -143,16 +159,11 @@ export function applyReviewDecision(
   return task;
 }
 
-export interface ApplyIntegrateOptions {
-  /** When true (default), path locks are NOT released on conflict (KD-34). */
-  retain_locks_on_conflict?: boolean;
-}
-
 export interface ApplyIntegrateResult {
   task: Task;
   /** New feature tip when integrate succeeded. */
   feature_tip_sha?: string;
-  /** True when path-scope locks should be released (done / cancelled / abandon). */
+  /** True when path-scope locks should be released (done / terminal failed). */
   release_scope_locks: boolean;
   /** True when mutex must be released (always after integrate attempt). */
   release_mutex: boolean;
@@ -161,14 +172,14 @@ export interface ApplyIntegrateResult {
 /**
  * Apply forge integrate result to an integrating task (KD-33/34).
  *
- * - ok → done; release path locks; release mutex; clear QA tip invalidation is caller's job
+ * - ok → done; release path locks; release mutex
  * - conflict → blocked/integrate_conflict; keep path locks; release mutex
- * - error → failed (or blocked resource); release mutex; release locks on failed
+ * - error under max_attempts → requeue ready (attempt++) with locks kept for rework
+ * - error at max_attempts → terminal failed; release locks; KD-36 escalates
  */
 export function applyIntegrateResult(
   task: Task,
   result: ForgeIntegrateResult,
-  _options: ApplyIntegrateOptions = {},
 ): ApplyIntegrateResult {
   if (task.status !== "integrating") {
     throw new ImplementingError(
@@ -204,28 +215,58 @@ export function applyIntegrateResult(
     };
   }
 
-  // Hard integrate error
-  const next = transitionTaskStatus(task, "failed", {
-    integrate_error: result.error_message ?? "integrate error",
-  });
-  // Store error on failed task via extend
-  const withErr: Task = {
-    ...next,
-    integrate_error: result.error_message ?? "integrate error",
-  };
+  // Hard integrate error (non-conflict)
+  const errMsg = result.error_message ?? "integrate error";
+  const canRetry = task.attempt < task.max_attempts;
+  if (canRetry) {
+    // Requeue for worker rework: integrating → failed → ready (attempt++).
+    // Keep path locks so the same task retains scope while retrying.
+    const failed = transitionTaskStatus(task, "failed");
+    const ready = transitionTaskStatus(failed, "ready");
+    return {
+      task: {
+        ...ready,
+        integrate_error: errMsg,
+      },
+      release_scope_locks: false,
+      release_mutex: true,
+    };
+  }
+
+  // Terminal failed — KD-36 will escalate
+  const next = transitionTaskStatus(task, "failed");
   return {
-    task: withErr,
+    task: {
+      ...next,
+      integrate_error: errMsg,
+    },
     release_scope_locks: true,
     release_mutex: true,
   };
+}
+
+export interface RecoverIntegrateConflictResult {
+  /** True when task moved blocked → ready. */
+  recovered: boolean;
+  task: Task;
+  /**
+   * True when attempt already at max — leave blocked, escalate
+   * human_intervention (integrate_conflict_storm). Locks stay held.
+   */
+  storm: boolean;
 }
 
 /**
  * KD-34 recovery: blocked/integrate_conflict → ready for same-task rework.
  * Path locks stay held by this task id (caller does not release).
  * Increments attempt so escalate + max_attempts apply.
+ *
+ * When `attempt >= max_attempts`, does **not** recover (avoids infinite
+ * conflict loops); returns `storm: true` for KD-36-style gate.
  */
-export function recoverIntegrateConflict(task: Task): Task {
+export function recoverIntegrateConflict(
+  task: Task,
+): RecoverIntegrateConflictResult {
   if (
     task.status !== "blocked" ||
     task.blocked_reason !== "integrate_conflict"
@@ -236,15 +277,21 @@ export function recoverIntegrateConflict(task: Task): Task {
     );
   }
 
-  // Keep integrate_error for worker instructions; clear blocked_reason on ready
-  return transitionTaskStatus(task, "ready", {
+  if (task.attempt >= task.max_attempts) {
+    return { recovered: false, task, storm: true };
+  }
+
+  // Keep integrate_error for worker instructions + review-bypass gate
+  const next = transitionTaskStatus(task, "ready", {
     increment_attempt: true,
     clear_blocked: true,
   });
+  return { recovered: true, task: next, storm: false };
 }
 
 /**
  * After conflict rework, if only markers fixed → integrating; else review.
+ * Caller must only use this after conflict rework (integrate_error context).
  */
 export function afterConflictRework(
   task: Task,

@@ -32,10 +32,12 @@ import {
 } from "../planning/replan.js";
 import {
   defaultSchedulerConfig,
+  releaseTaskScopeLocks,
   schedulerTickAsync,
   type AssignRoutingOptions,
   type SchedulerConfig,
   type SchedulerRuntimeState,
+  type SchedulerSession,
   type SchedulerTickResult,
   type ScopeLockPort,
   type WorktreePort,
@@ -61,6 +63,7 @@ import type {
   WorkerSessionPort,
 } from "./ports.js";
 import {
+  applyConflictStormPolicy,
   applyTerminalFailedPolicy,
   type OnTaskTerminalFailed,
   type TerminalFailedPolicy,
@@ -97,6 +100,11 @@ export interface ImplementingTickParams {
   /** Max workers to run this tick. */
   max_workers?: number;
   terminal_failed?: TerminalFailedPolicy;
+  /**
+   * Pending/open gates for this run (KD-36 idempotency).
+   * Also merged into policy.existing_gates.
+   */
+  existing_gates?: readonly Gate[];
   /** Try Implementing exit when predicate holds (default false — caller opts in). */
   try_exit?: boolean;
   now_ms?: number;
@@ -122,6 +130,8 @@ export interface ImplementingTickResult {
     deferred?: boolean;
   }>;
   recovered_conflict_ids: string[];
+  /** Conflict storm task ids left blocked at max_attempts. */
+  conflict_storm_ids: string[];
   gates: Gate[];
   escalated_task_ids: string[];
   exited: boolean;
@@ -141,6 +151,20 @@ function replaceTasks(
   updates: ReadonlyMap<string, Task>,
 ): Task[] {
   return tasks.map((t) => updates.get(t.id) ?? t);
+}
+
+function countHoldingSlots(sessions: readonly SchedulerSession[]): number {
+  return sessions.filter(
+    (s) => s.state === "running" || s.state === "starting",
+  ).length;
+}
+
+function countActiveReviewers(sessions: readonly SchedulerSession[]): number {
+  return sessions.filter(
+    (s) =>
+      s.role === "reviewer" &&
+      (s.state === "running" || s.state === "starting"),
+  ).length;
 }
 
 /**
@@ -167,16 +191,22 @@ export async function implementingTick(
   const review_outcomes: ImplementingTickResult["review_outcomes"] = [];
   const integrate_results: ImplementingTickResult["integrate_results"] = [];
   const recovered_conflict_ids: string[] = [];
+  const conflict_storm_ids: string[] = [];
+  const escalated_task_ids: string[] = [];
   const nowMs = params.now_ms ?? Date.now();
   const cwd = params.cwd ?? params.repo_root ?? ".";
   const config = params.config ?? defaultSchedulerConfig();
+  const existingGates: Gate[] = [
+    ...(params.existing_gates ?? []),
+    ...(params.terminal_failed?.existing_gates ?? []),
+  ];
 
   // 1. Promote todo → ready
   if (params.promote_ready !== false) {
     tasks = promoteTodos(tasks);
   }
 
-  // 2. Recover integrate_conflict → ready (locks retained on task id)
+  // 2. Recover integrate_conflict → ready (locks retained), or storm at max
   if (params.auto_recover_integrate_conflict !== false) {
     const updates = new Map<string, Task>();
     for (const t of tasks) {
@@ -184,12 +214,35 @@ export async function implementingTick(
         t.status === "blocked" &&
         t.blocked_reason === "integrate_conflict"
       ) {
-        const next = recoverIntegrateConflict(t);
-        updates.set(t.id, next);
-        recovered_conflict_ids.push(t.id);
+        const result = recoverIntegrateConflict(t);
+        updates.set(t.id, result.task);
+        if (result.recovered) {
+          recovered_conflict_ids.push(t.id);
+        } else if (result.storm) {
+          conflict_storm_ids.push(t.id);
+        }
       }
     }
     if (updates.size > 0) tasks = replaceTasks(tasks, updates);
+
+    if (conflict_storm_ids.length > 0) {
+      const storm = applyConflictStormPolicy(run, conflict_storm_ids, {
+        existing_gates: existingGates,
+        ...(params.terminal_failed?.already_escalated_task_ids !== undefined
+          ? {
+              already_escalated_task_ids:
+                params.terminal_failed.already_escalated_task_ids,
+            }
+          : {}),
+        ...(params.now !== undefined ? { now: params.now } : {}),
+        ...(params.nextGateId !== undefined
+          ? { nextGateId: params.nextGateId }
+          : {}),
+      });
+      gates.push(...storm.gates);
+      escalated_task_ids.push(...storm.escalated_task_ids);
+      existingGates.push(...storm.gates);
+    }
   }
 
   // 3. Scheduler assign (locks + router with escalate on retry)
@@ -261,6 +314,12 @@ export async function implementingTick(
       const next = applyWorkerOutcome(t, outcome);
       updates.set(t.id, next);
       worker_outcomes.push({ task_id: t.id, kind: outcome.kind });
+
+      // Path-scope locks release on terminal failed / cancelled (KD-15)
+      if (next.status === "failed" || next.status === "cancelled") {
+        releaseTaskScopeLocks(params.locks, t.id);
+      }
+
       // Free worker session slot when task leaves in_progress
       if (next.status !== "in_progress" && session) {
         runtime = {
@@ -277,67 +336,94 @@ export async function implementingTick(
     if (updates.size > 0) tasks = replaceTasks(tasks, updates);
   }
 
-  // 5. Run reviewers for review queue
+  // 5. Run reviewers for review queue — respect max_reviewers + free slots
   if (params.reviewer && params.run_reviews !== false) {
     const reviewQueue = tasks.filter((t) => t.status === "review");
-    const activeReviewers = runtime.sessions.filter(
-      (s) =>
-        s.role === "reviewer" &&
-        (s.state === "running" || s.state === "starting"),
-    ).length;
-    const freeSlots = Math.max(
-      0,
-      config.scheduling.max_concurrent_agents -
-        runtime.sessions.filter(
-          (s) => s.state === "running" || s.state === "starting",
-        ).length,
-    );
-    const canStart = canStartReviewerSession({
-      review_queue_count: reviewQueue.length,
-      active_reviewers: activeReviewers,
-      max_reviewers: config.team.max_reviewers,
-      free_slots: freeSlots,
-      mode_allows: config.team.mode !== "solo" || config.team.max_reviewers > 0,
-    });
+    const maxR = params.max_reviews ?? reviewQueue.length;
+    const updates = new Map<string, Task>();
+    const preferred = preferredAdaptersForRole("reviewer");
+    let count = 0;
 
-    if (canStart || reviewQueue.length > 0) {
-      const maxR = params.max_reviews ?? reviewQueue.length;
-      let count = 0;
-      const updates = new Map<string, Task>();
-      const preferred = preferredAdaptersForRole("reviewer");
-      for (const t of reviewQueue) {
-        if (count >= maxR) break;
-        // Route reviewer (ephemeral)
-        const route: RouteResult = routeModel({
-          role: "reviewer",
-          task_id: t.id,
-          preferred_adapters: [...preferred],
-          adapters: params.routing?.adapters ?? defaultAdaptersForRouting(),
-          ...(params.routing?.config !== undefined
-            ? { config: params.routing.config }
-            : {}),
-        });
-        const agentId = params.nextAgentId?.() ?? generateId("agt");
-        const outcome = await params.reviewer.run({
-          task: t,
-          agent_id: agentId,
-          adapter_id: route.adapter_id,
-          model: route.model,
-          model_tier: route.tier,
-          session_kind: route.session_kind,
-          ...(route.effort !== undefined ? { effort: route.effort } : {}),
-          cwd,
-        });
-        const next = applyReviewDecision(t, outcome);
-        updates.set(t.id, next);
-        review_outcomes.push({
-          task_id: t.id,
-          decision: outcome.decision,
-        });
-        count += 1;
+    for (const t of reviewQueue) {
+      if (count >= maxR) break;
+
+      const activeReviewers = countActiveReviewers(runtime.sessions);
+      const freeSlots = Math.max(
+        0,
+        config.scheduling.max_concurrent_agents -
+          countHoldingSlots(runtime.sessions),
+      );
+      const canStart = canStartReviewerSession({
+        review_queue_count: reviewQueue.length - count,
+        active_reviewers: activeReviewers,
+        max_reviewers: config.team.max_reviewers,
+        free_slots: freeSlots,
+        mode_allows:
+          config.team.mode !== "solo" || config.team.max_reviewers > 0,
+      });
+      if (!canStart) break;
+
+      // Route reviewer (ephemeral)
+      const route: RouteResult = routeModel({
+        role: "reviewer",
+        task_id: t.id,
+        preferred_adapters: [...preferred],
+        adapters: params.routing?.adapters ?? defaultAdaptersForRouting(),
+        ...(params.routing?.config !== undefined
+          ? { config: params.routing.config }
+          : {}),
+      });
+      const agentId = params.nextAgentId?.() ?? generateId("agt");
+      const runHandle = `review_${t.id}_${nowMs}_${count}`;
+
+      // Register transient reviewer session so caps/free slots update (Issue 8)
+      const reviewerSession: SchedulerSession = {
+        run_handle: runHandle,
+        agent_id: agentId,
+        role: "reviewer",
+        task_id: t.id,
+        state: "running",
+        adapter_id: route.adapter_id,
+        model: route.model,
+        model_tier: route.tier,
+        last_activity_ms: nowMs,
+      };
+      runtime = {
+        ...runtime,
+        sessions: [...runtime.sessions, reviewerSession],
+      };
+
+      const outcome = await params.reviewer.run({
+        task: t,
+        agent_id: agentId,
+        adapter_id: route.adapter_id,
+        model: route.model,
+        model_tier: route.tier,
+        session_kind: route.session_kind,
+        ...(route.effort !== undefined ? { effort: route.effort } : {}),
+        cwd,
+        run_handle: runHandle,
+      });
+      const next = applyReviewDecision(t, outcome);
+      updates.set(t.id, next);
+      review_outcomes.push({
+        task_id: t.id,
+        decision: outcome.decision,
+      });
+
+      // Release locks on terminal failed from review reject exhaustion
+      if (next.status === "failed" || next.status === "cancelled") {
+        releaseTaskScopeLocks(params.locks, t.id);
       }
-      if (updates.size > 0) tasks = replaceTasks(tasks, updates);
+
+      // Ephemeral reviewer exits after outcome (clean exit)
+      runtime = {
+        ...runtime,
+        sessions: runtime.sessions.filter((s) => s.run_handle !== runHandle),
+      };
+      count += 1;
     }
+    if (updates.size > 0) tasks = replaceTasks(tasks, updates);
   }
 
   // 6. Drain integrate queue under mutex (no agent slot)
@@ -369,22 +455,27 @@ export async function implementingTick(
     }
   }
 
-  // 7. Terminal failed policy (KD-36)
+  // 7. Terminal failed policy (KD-36) — idempotent vs existing gates
   const tfPolicy: TerminalFailedPolicy = {
     on_task_terminal_failed:
       (config.scheduling.on_task_terminal_failed as OnTaskTerminalFailed) ??
       "gate",
     failed_escalation_ms: config.scheduling.failed_escalation_ms ?? 0,
     now_ms: nowMs,
+    existing_gates: existingGates,
     ...(params.now !== undefined ? { now: params.now } : {}),
     ...(params.nextGateId !== undefined
       ? { nextGateId: params.nextGateId }
       : {}),
     ...(params.terminal_failed ?? {}),
   };
+  // Ensure existing_gates from params win merge with storm gates this tick
+  tfPolicy.existing_gates = existingGates;
+
   const terminal = applyTerminalFailedPolicy(run, tasks, tfPolicy);
   run = terminal.run;
   gates.push(...terminal.gates);
+  escalated_task_ids.push(...terminal.escalated_task_ids);
 
   // 8. Optional exit
   let exited = false;
@@ -402,8 +493,9 @@ export async function implementingTick(
     review_outcomes,
     integrate_results,
     recovered_conflict_ids,
+    conflict_storm_ids,
     gates,
-    escalated_task_ids: terminal.escalated_task_ids,
+    escalated_task_ids,
     exited,
   };
 }

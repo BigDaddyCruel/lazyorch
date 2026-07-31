@@ -43,7 +43,8 @@ export interface IntegrateOneResult {
 
 /**
  * Attempt one integrate for a task already in `integrating`.
- * Acquires mutex → forge.integrate → apply result → always release mutex.
+ * Acquires mutex → forge.integrate → apply result → always release mutex
+ * (in `finally`, so unexpected throws cannot stick the mutex).
  */
 export async function integrateOne(
   params: IntegrateOneParams,
@@ -70,58 +71,71 @@ export async function integrateOne(
     };
   }
 
-  let integrate: ForgeIntegrateResult;
+  let integrate: ForgeIntegrateResult = {
+    status: "error",
+    error_message: "integrate not started",
+  };
+  let appliedTask = task;
+  let featureTip: string | undefined;
+  let releaseLocks = false;
+  let mutex_released = false;
+
   try {
-    integrate = await forge.integrate({
-      run_id: run.id,
-      task_id: task.id,
-      ...(task.branch !== undefined ? { task_branch: task.branch } : {}),
-      ...(params.feature_branch !== undefined
-        ? { feature_branch: params.feature_branch }
-        : run.feature_branch !== undefined
-          ? { feature_branch: run.feature_branch }
+    try {
+      integrate = await forge.integrate({
+        run_id: run.id,
+        task_id: task.id,
+        ...(task.branch !== undefined ? { task_branch: task.branch } : {}),
+        ...(params.feature_branch !== undefined
+          ? { feature_branch: params.feature_branch }
+          : run.feature_branch !== undefined
+            ? { feature_branch: run.feature_branch }
+            : {}),
+        ...(task.worktree_path !== undefined
+          ? { worktree_path: task.worktree_path }
           : {}),
-      ...(task.worktree_path !== undefined
-        ? { worktree_path: task.worktree_path }
-        : {}),
-      ...(params.repo_root !== undefined
-        ? { repo_root: params.repo_root }
-        : {}),
-    });
-  } catch (err) {
-    integrate = {
-      status: "error",
-      error_message: err instanceof Error ? err.message : String(err),
-    };
+        ...(params.repo_root !== undefined
+          ? { repo_root: params.repo_root }
+          : {}),
+      });
+    } catch (err) {
+      integrate = {
+        status: "error",
+        error_message: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const applied = applyIntegrateResult(task, integrate);
+    appliedTask = applied.task;
+    featureTip = applied.feature_tip_sha;
+    releaseLocks = applied.release_scope_locks;
+  } finally {
+    mutex.release(run.id);
+    mutex_released = true;
   }
 
-  const applied = applyIntegrateResult(task, integrate);
-
-  // Always release mutex after attempt (success or conflict or error)
-  mutex.release(run.id);
-
   let scope_locks_released = false;
-  if (applied.release_scope_locks && params.locks) {
+  if (releaseLocks && params.locks) {
     releaseTaskScopeLocks(params.locks, task.id);
     scope_locks_released = true;
   }
 
   let nextRun = run;
-  if (applied.feature_tip_sha !== undefined) {
+  if (featureTip !== undefined) {
     // Tip moved → invalidate run-level QA (must re-run at new tip)
     nextRun = {
       ...run,
-      feature_tip_sha: applied.feature_tip_sha,
+      feature_tip_sha: featureTip,
       updated_at: new Date().toISOString(),
       qa: {},
     };
   }
 
   return {
-    task: applied.task,
+    task: appliedTask,
     run: nextRun,
     integrate,
-    mutex_released: true,
+    mutex_released,
     scope_locks_released,
     deferred: false,
   };

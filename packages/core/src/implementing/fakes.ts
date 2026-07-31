@@ -21,6 +21,8 @@ export class FakeIntegrationMutex implements IntegrationMutexPort {
   private readonly holders = new Map<string, string>();
 
   tryAcquire(runId: string, taskId: string): IntegrationMutexAcquireResult {
+    if (runId === "") throw new Error("runId must be non-empty");
+    if (taskId === "") throw new Error("taskId must be non-empty");
     const current = this.holders.get(runId);
     if (current !== undefined && current !== taskId) {
       return { ok: false, holder: current };

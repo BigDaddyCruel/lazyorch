@@ -374,6 +374,158 @@ describe("implementingTick — assign/review/integrate loop", () => {
     expect(tick.gates[0]?.type).toBe("human_intervention");
     expect(tick.run.phase).toBe("Implementing");
   });
+
+  it("KD-36 gate is idempotent across ticks with existing_gates", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const tasks = [
+      task({ id: "tsk_a", status: "failed", attempt: 3, max_attempts: 3 }),
+    ];
+
+    const first = await implementingTick({
+      run: run(),
+      tasks,
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      now_ms: 1_000,
+      nextGateId: () => "gate_human_1",
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+    expect(first.gates).toHaveLength(1);
+
+    const second = await implementingTick({
+      run: first.run,
+      tasks,
+      runtime: first.runtime,
+      locks,
+      mutex,
+      forge,
+      existing_gates: first.gates,
+      now_ms: 2_000,
+      nextGateId: () => "gate_human_2",
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+    expect(second.gates).toHaveLength(0);
+    expect(second.escalated_task_ids).toHaveLength(0);
+  });
+
+  it("releases path-scope locks on terminal worker failed", async () => {
+    seq = 0;
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const worktrees = new FakeWorktreePort();
+    const worker = new FakeWorkerSession({
+      defaultQueue: [{ kind: "fail" }],
+    });
+
+    // Assign + fail in one tick (worker runs after assign)
+    const tick = await implementingTick({
+      run: run(),
+      tasks: [
+        task({
+          id: "tsk_a",
+          status: "ready",
+          scope: ["src/a/**"],
+          attempt: 3,
+          max_attempts: 3,
+        }),
+      ],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      worktrees,
+      worker,
+      routing: { adapters: defaultAdaptersForRouting() },
+      now_ms: 1_000,
+      nextAgentId,
+      run_workers: true,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(tick.tasks[0]?.status).toBe("failed");
+    expect(locks.isHolder("tsk_a")).toBe(false);
+  });
+
+  it("does not start reviewers when max_reviewers is 0", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const reviewer = new FakeReviewerSession({
+      defaultQueue: [{ decision: "approve" }],
+    });
+    const config = defaultSchedulerConfig();
+    config.team = { ...config.team, max_reviewers: 0, min_reviewers: 0 };
+
+    const tick = await implementingTick({
+      run: run(),
+      tasks: [task({ id: "tsk_a", status: "review", scope: ["src/a/**"] })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      reviewer,
+      config,
+      routing: { adapters: defaultAdaptersForRouting() },
+      now_ms: 1_000,
+      nextAgentId,
+      run_workers: false,
+      run_reviews: true,
+      run_integrates: false,
+    });
+
+    expect(reviewer.requests).toHaveLength(0);
+    expect(tick.review_outcomes).toHaveLength(0);
+    expect(tick.tasks[0]?.status).toBe("review");
+  });
+
+  it("conflict storm at max_attempts opens gate and stays blocked", async () => {
+    const locks = new FakeScopeLockManager();
+    locks.tryAcquire("tsk_a", ["src/a/**"]);
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+
+    const tick = await implementingTick({
+      run: run(),
+      tasks: [
+        task({
+          id: "tsk_a",
+          status: "blocked",
+          blocked_reason: "integrate_conflict",
+          integrate_error: "CONFLICT",
+          scope: ["src/a/**"],
+          attempt: 3,
+          max_attempts: 3,
+        }),
+      ],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      now_ms: 1_000,
+      nextGateId: () => "gate_storm_1",
+      auto_recover_integrate_conflict: true,
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(tick.recovered_conflict_ids).toHaveLength(0);
+    expect(tick.conflict_storm_ids).toEqual(["tsk_a"]);
+    expect(tick.tasks[0]?.status).toBe("blocked");
+    expect(tick.gates).toHaveLength(1);
+    expect(tick.gates[0]?.payload.reason).toBe("integrate_conflict_storm");
+    expect(locks.isHolder("tsk_a")).toBe(true);
+  });
 });
 
 describe("replan protocol hooks", () => {

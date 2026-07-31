@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { SCHEMA_VERSION } from "../schema.js";
+import type { Gate } from "../types/gate.js";
 import type { Run } from "../types/run.js";
 import type { Task } from "../types/task.js";
 import {
+  applyConflictStormPolicy,
   applyTerminalFailedPolicy,
+  createHumanInterventionGate,
   terminalFailedTasks,
 } from "./terminal-failed.js";
 
@@ -73,6 +76,37 @@ describe("applyTerminalFailedPolicy (KD-36)", () => {
     expect(r.escalated_task_ids).toEqual(["tsk_a"]);
   });
 
+  it("is idempotent — second call with existing gate opens none", () => {
+    const tasks = [
+      task({ id: "tsk_a", status: "failed", attempt: 3, max_attempts: 3 }),
+    ];
+    const first = applyTerminalFailedPolicy(run(), tasks, {
+      now: () => FIXED,
+      nextGateId: () => "gate_once",
+    });
+    expect(first.gates).toHaveLength(1);
+
+    const second = applyTerminalFailedPolicy(run(), tasks, {
+      now: () => FIXED,
+      nextGateId: () => "gate_dup",
+      existing_gates: first.gates,
+    });
+    expect(second.gates).toHaveLength(0);
+    expect(second.escalated_task_ids).toHaveLength(0);
+  });
+
+  it("respects already_escalated_task_ids", () => {
+    const r = applyTerminalFailedPolicy(
+      run(),
+      [task({ id: "tsk_a", status: "failed", attempt: 3, max_attempts: 3 })],
+      {
+        already_escalated_task_ids: new Set(["tsk_a"]),
+        now: () => FIXED,
+      },
+    );
+    expect(r.gates).toHaveLength(0);
+  });
+
   it("fail_run transitions run to Failed", () => {
     const r = applyTerminalFailedPolicy(
       run(),
@@ -104,6 +138,34 @@ describe("applyTerminalFailedPolicy (KD-36)", () => {
         now_ms: 1_000 + 10_000,
       },
     );
+    expect(r.gates).toHaveLength(0);
+  });
+});
+
+describe("applyConflictStormPolicy", () => {
+  it("opens integrate_conflict_storm gate", () => {
+    const r = applyConflictStormPolicy(run(), ["tsk_a"], {
+      now: () => FIXED,
+      nextGateId: () => "gate_storm",
+    });
+    expect(r.gates).toHaveLength(1);
+    expect(r.gates[0]?.payload.reason).toBe("integrate_conflict_storm");
+  });
+
+  it("is idempotent against existing storm gate", () => {
+    const existing: Gate[] = [
+      createHumanInterventionGate({
+        run_id: run().id,
+        task_ids: ["tsk_a"],
+        reason: "integrate_conflict_storm",
+        now: () => FIXED,
+        nextGateId: () => "gate_existing",
+      }),
+    ];
+    const r = applyConflictStormPolicy(run(), ["tsk_a"], {
+      existing_gates: existing,
+      nextGateId: () => "gate_new",
+    });
     expect(r.gates).toHaveLength(0);
   });
 });

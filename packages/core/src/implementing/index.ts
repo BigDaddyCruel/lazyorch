@@ -22,13 +22,14 @@ export type {
 
 export {
   ImplementingError,
+  isIntegrateConflictRework,
   applyWorkerOutcome,
   applyReviewDecision,
   applyIntegrateResult,
   recoverIntegrateConflict,
   afterConflictRework,
-  type ApplyIntegrateOptions,
   type ApplyIntegrateResult,
+  type RecoverIntegrateConflictResult,
 } from "./outcomes.js";
 
 export {
@@ -41,10 +42,15 @@ export {
 
 export {
   terminalFailedTasks,
+  coveredByPendingIntervention,
   applyTerminalFailedPolicy,
+  createHumanInterventionGate,
+  applyConflictStormPolicy,
   type OnTaskTerminalFailed,
+  type HumanInterventionReason,
   type TerminalFailedPolicy,
   type TerminalFailedResult,
+  type CreateHumanInterventionGateOpts,
 } from "./terminal-failed.js";
 
 export {
