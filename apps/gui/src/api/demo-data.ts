@@ -1,0 +1,326 @@
+import type { BoardRun } from "./types.js";
+
+/**
+ * Demo board data for offline UI development and empty-daemon smoke.
+ * No orchestration — pure presentation fixtures.
+ */
+export function createDemoRuns(): BoardRun[] {
+  const now = new Date().toISOString();
+  return [
+    {
+      id: "run_demo_board",
+      project_id: "proj_demo",
+      phase: "Implementing",
+      idea: "Ship Windows GUI MVP (Tauri) talking to the local daemon",
+      created_at: now,
+      updated_at: now,
+      feature_branch: "execute-plan/7528600e-pr-20-windows-gui-mvp-tauri",
+      tasks: [
+        {
+          id: "tsk_scaffold",
+          run_id: "run_demo_board",
+          title: "Scaffold Vite + Tauri shell",
+          status: "done",
+          priority: 1,
+          assignee: "agt_worker_1",
+          last_model_tier: "medium",
+          last_adapter_id: "claude",
+          last_model_id: "default",
+        },
+        {
+          id: "tsk_api_client",
+          run_id: "run_demo_board",
+          title: "Daemon HTTP/SSE client",
+          status: "done",
+          priority: 1,
+          assignee: "agt_worker_1",
+          last_model_tier: "small",
+          last_adapter_id: "codex",
+        },
+        {
+          id: "tsk_board",
+          run_id: "run_demo_board",
+          title: "Run board + task kanban",
+          status: "in_progress",
+          priority: 1,
+          assignee: "agt_worker_2",
+          last_model_tier: "medium",
+          last_adapter_id: "claude",
+          last_model_id: "default",
+        },
+        {
+          id: "tsk_gates",
+          run_id: "run_demo_board",
+          title: "Gates badge + approve UX hooks",
+          status: "ready",
+          priority: 2,
+          role_affinity: ["worker"],
+        },
+        {
+          id: "tsk_agents",
+          run_id: "run_demo_board",
+          title: "Agents + adapter health panel",
+          status: "review",
+          priority: 2,
+          assignee: "agt_reviewer",
+          last_model_tier: "medium",
+          last_adapter_id: "claude",
+        },
+        {
+          id: "tsk_settings",
+          run_id: "run_demo_board",
+          title: "Settings + model/tier display",
+          status: "todo",
+          priority: 3,
+        },
+        {
+          id: "tsk_blocked",
+          run_id: "run_demo_board",
+          title: "Wire full run detail HTTP (pending daemon)",
+          status: "blocked",
+          priority: 3,
+          blocked_reason: "dependency",
+        },
+        {
+          id: "tsk_failed_sample",
+          run_id: "run_demo_board",
+          title: "Sample failed task (fixture)",
+          status: "failed",
+          priority: 4,
+        },
+      ],
+      gates: [
+        {
+          id: "gate_plan_demo",
+          type: "plan_approve",
+          run_id: "run_demo_board",
+          status: "approved",
+          created_at: now,
+          payload: { decision: "approve" },
+        },
+        {
+          id: "gate_task_demo",
+          type: "task_approve",
+          run_id: "run_demo_board",
+          status: "pending",
+          created_at: now,
+          payload: { task_id: "tsk_agents" },
+        },
+      ],
+      agents: [
+        {
+          id: "agt_lead",
+          run_id: "run_demo_board",
+          role: "lead",
+          labels: ["architect-lead"],
+          preferred_adapters: ["claude", "codex"],
+          default_tier: "medium",
+          session_status: "running",
+          last_adapter_id: "claude",
+          last_model_id: "default",
+          last_model_tier: "medium",
+        },
+        {
+          id: "agt_worker_1",
+          run_id: "run_demo_board",
+          role: "worker",
+          labels: ["fullstack-dev"],
+          preferred_adapters: ["claude", "codex", "shell"],
+          default_tier: "small",
+          session_status: "idle",
+          last_adapter_id: "codex",
+          last_model_tier: "small",
+        },
+        {
+          id: "agt_worker_2",
+          run_id: "run_demo_board",
+          role: "worker",
+          labels: ["frontend-dev"],
+          preferred_adapters: ["claude"],
+          default_tier: "small",
+          session_status: "running",
+          last_adapter_id: "claude",
+          last_model_tier: "medium",
+        },
+        {
+          id: "agt_reviewer",
+          run_id: "run_demo_board",
+          role: "reviewer",
+          labels: ["code-reviewer"],
+          preferred_adapters: ["claude", "grok"],
+          default_tier: "medium",
+          session_status: "running",
+          last_adapter_id: "claude",
+          last_model_tier: "medium",
+        },
+        {
+          id: "agt_qa",
+          run_id: "run_demo_board",
+          role: "qa",
+          labels: ["qa-engineer"],
+          preferred_adapters: ["shell", "claude"],
+          default_tier: "small",
+          session_status: "idle",
+        },
+      ],
+      plan: {
+        id: "plan_demo",
+        run_id: "run_demo_board",
+        revision: 2,
+        status: "frozen",
+        task_ids: [
+          "tsk_scaffold",
+          "tsk_api_client",
+          "tsk_board",
+          "tsk_gates",
+          "tsk_agents",
+          "tsk_settings",
+        ],
+        issues: [
+          {
+            id: "iss_1",
+            severity: "medium",
+            category: "scope",
+            section: "GUI",
+            description: "Keep orchestration out of Rust; HTTP/SSE only",
+            status: "addressed",
+          },
+          {
+            id: "iss_2",
+            severity: "low",
+            category: "completeness",
+            section: "API",
+            description: "Full run detail endpoints still stubbed on daemon",
+            status: "open",
+          },
+        ],
+        residual_risks: ["Daemon run-detail HTTP not fully wired; GUI uses demo fill-in"],
+        freeze_hash: "demo_freeze_hash",
+        updated_at: now,
+      },
+    },
+    {
+      id: "run_demo_planning",
+      project_id: "proj_demo",
+      phase: "PlanConsensus",
+      idea: "Example planning-phase run awaiting human plan gate",
+      created_at: now,
+      updated_at: now,
+      tasks: [
+        {
+          id: "tsk_plan_write",
+          run_id: "run_demo_planning",
+          title: "Draft design + TASK_DAG",
+          status: "done",
+          priority: 1,
+          last_model_tier: "large",
+          last_adapter_id: "claude",
+        },
+        {
+          id: "tsk_plan_review",
+          run_id: "run_demo_planning",
+          title: "Plan review round",
+          status: "review",
+          priority: 1,
+          last_model_tier: "large",
+          last_adapter_id: "grok",
+        },
+      ],
+      gates: [
+        {
+          id: "gate_plan_pending",
+          type: "plan_approve",
+          run_id: "run_demo_planning",
+          status: "pending",
+          created_at: now,
+        },
+      ],
+      agents: [
+        {
+          id: "agt_pw",
+          run_id: "run_demo_planning",
+          role: "plan_writer",
+          labels: ["plan-writer"],
+          preferred_adapters: ["claude"],
+          default_tier: "large",
+          session_status: "stopped",
+          last_adapter_id: "claude",
+          last_model_tier: "large",
+        },
+        {
+          id: "agt_pr",
+          run_id: "run_demo_planning",
+          role: "plan_reviewer",
+          labels: ["plan-reviewer"],
+          preferred_adapters: ["grok", "claude"],
+          default_tier: "large",
+          session_status: "idle",
+          last_adapter_id: "grok",
+          last_model_tier: "large",
+        },
+      ],
+      plan: {
+        id: "plan_planning",
+        run_id: "run_demo_planning",
+        revision: 1,
+        status: "in_review",
+        task_ids: ["tsk_plan_write", "tsk_plan_review"],
+        issues: [
+          {
+            id: "iss_p1",
+            severity: "high",
+            category: "feasibility",
+            section: "Timeline",
+            description: "Need clearer acceptance criteria for M6 GUI",
+            status: "open",
+          },
+        ],
+        updated_at: now,
+      },
+    },
+  ];
+}
+
+export function createDemoEvents(): Array<{
+  id: string;
+  ts: string;
+  type: string;
+  project_id?: string;
+  run_id?: string;
+  payload?: Record<string, unknown>;
+}> {
+  const ts = new Date().toISOString();
+  return [
+    {
+      id: "evt_1",
+      ts,
+      type: "run.phase_changed",
+      project_id: "proj_demo",
+      run_id: "run_demo_board",
+      payload: { phase: "Implementing" },
+    },
+    {
+      id: "evt_2",
+      ts,
+      type: "gate.required",
+      project_id: "proj_demo",
+      run_id: "run_demo_board",
+      payload: { gate_id: "gate_task_demo", type: "task_approve" },
+    },
+    {
+      id: "evt_3",
+      ts,
+      type: "task.status_changed",
+      project_id: "proj_demo",
+      run_id: "run_demo_board",
+      payload: { task_id: "tsk_board", status: "in_progress" },
+    },
+    {
+      id: "evt_4",
+      ts,
+      type: "adapter.health",
+      project_id: "proj_demo",
+      payload: { adapter_id: "shell", health: "ok" },
+    },
+  ];
+}

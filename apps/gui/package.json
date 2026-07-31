@@ -2,9 +2,29 @@
   "name": "@lazyorch/gui",
   "version": "0.0.0",
   "private": true,
-  "description": "LazyOrch desktop GUI (Tauri 2 + web UI) — placeholder",
+  "type": "module",
+  "description": "LazyOrch desktop GUI (Tauri 2 + web UI MVP)",
   "scripts": {
-    "typecheck": "echo \"GUI typecheck deferred until Tauri scaffold\"",
-    "build": "echo \"GUI build deferred until Tauri scaffold\""
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.7",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "vitest": "^3.0.2"
   }
 }

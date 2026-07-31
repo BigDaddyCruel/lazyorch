@@ -3,4 +3,5 @@ node_modules
 coverage
 pnpm-lock.yaml
 *.md
-apps/gui
+apps/gui/src-tauri
+apps/gui/dist
