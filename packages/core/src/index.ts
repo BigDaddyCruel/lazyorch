@@ -1,7 +1,7 @@
 /**
  * @lazyorch/core — FSM, tasks, planning, scheduling, and domain types.
  * PR-02: types, IDs, JSON I/O, schema_version, DAG/issue helpers.
- * (FSM transition tables land in PR-03.)
+ * PR-03: dual FSM engine (run + task), exit predicate, simulator.
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
 
@@ -35,3 +35,33 @@ export {
 
 export { readJsonFile, writeJsonFile } from "./store/json-io.js";
 export { StateStore } from "./store/state-store.js";
+
+export {
+  RunFsmError,
+  isTerminalPhase,
+  canTransitionRunPhase,
+  allowedRunTransitions,
+  transitionRunPhase,
+  hasReadyPr,
+  nextPhaseAfterImplementingExit,
+  type TransitionRunOptions,
+  TaskFsmError,
+  OPEN_TASK_STATUSES,
+  isTerminalTaskStatus,
+  canTransitionTaskStatus,
+  allowedTaskTransitions,
+  transitionTaskStatus,
+  type TransitionTaskOptions,
+  evaluatingImplementingExit,
+  canExitImplementing,
+  type ExitPredicateParams,
+  type ExitPredicateResult,
+  SimulatorError,
+  applySimEvent,
+  applySimEvents,
+  advanceParallel,
+  tryExitImplementing,
+  simulateImplementingToExit,
+  type SimState,
+  type SimEvent,
+} from "./orchestrator/index.js";
