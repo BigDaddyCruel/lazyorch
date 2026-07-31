@@ -42,6 +42,20 @@ describe("isPrefixedId / parseIdPrefix", () => {
     expect(parseIdPrefix("foo_bar")).toBeNull();
   });
 
+  it("rejects non-hex or wrong-length suffixes", () => {
+    expect(isPrefixedId("run_not-hex!")).toBe(false);
+    expect(isPrefixedId("run_zzzzzzzzzzzzzzzzzzzzzzzz")).toBe(false);
+    expect(isPrefixedId("run_" + "a".repeat(23))).toBe(false);
+    expect(isPrefixedId("run_" + "a".repeat(25))).toBe(false);
+    expect(parseIdPrefix("run_not-hex!")).toBeNull();
+  });
+
+  it("accepts strict {prefix}_{24 hex}", () => {
+    const id = "tsk_" + "0123456789abcdef01234567";
+    expect(isPrefixedId(id)).toBe(true);
+    expect(parseIdPrefix(id)).toBe("tsk");
+  });
+
   it("optionally checks a specific prefix", () => {
     const id = generateId("gate");
     expect(isPrefixedId(id, "gate")).toBe(true);

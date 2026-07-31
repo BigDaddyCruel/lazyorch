@@ -459,7 +459,8 @@ Produced under `.lazyorch/plans/<run_id>/`:
 
 ```typescript
 type IssueSeverity = "low" | "medium" | "high" | "critical";
-type IssueStatus = "open" | "addressed" | "wontfix";
+/** Blocking freeze while open or needs-user-input. */
+type IssueStatus = "open" | "addressed" | "wontfix" | "needs-user-input";
 
 interface PlanIssue {
   id: string;                 // iss_...
@@ -468,6 +469,7 @@ interface PlanIssue {
     | "completeness" | "clarity" | "other";
   section: string;            // e.g. "Goals", "TASK_DAG", "Security"
   description: string;
+  suggestion?: string;        // optional remediation hint from reviewer
   status: IssueStatus;
   response?: string;          // required when status=addressed|wontfix
   raised_by: string;          // agent_id or "human"
@@ -514,7 +516,7 @@ sequenceDiagram
 2. Writer must set `response` when moving an issue to `addressed` or `wontfix`.
 3. **Dispute escalation:** If writer sets `wontfix` and reviewer re-opens the same issue with `severity ∈ {high, critical}`, open gate `plan_dispute` (blocks freeze).
 4. **Max rounds** (default 5): open gate type **`plan_max_rounds`** (not `plan_dispute`) with payload actions:
-   - `force_approve` — freeze with residual `open` issues re-labeled `wontfix` + `response: "force_approve residual"`; residual risks listed in `meta.json` → then normal `plan_approve` if enabled → `Implementing`
+   - `force_approve` — freeze with residual blocking issues (`open` **or** `needs-user-input`) re-labeled `wontfix` + `response: "force_approve residual"`; residual risks listed in `meta.json` → then normal `plan_approve` if enabled → `Implementing`
    - `edit` — human patches DESIGN/TASK_DAG; triggers one more review round (does not reset round counter unless config `planning.edit_resets_rounds`); stay in `Planning`
    - `abort` — run → **`Cancelled`** (user/operator choice — never `Failed`)
 5. **Freeze validators** (all must pass; freeze rejected otherwise):
@@ -1814,8 +1816,8 @@ GUI never embeds orchestration logic.
 
 ```text
 <repo>/.lazyorch/
-  config.yml
-  project.yml              # schema_version, project id
+  config.yml               # operator config (YAML)
+  project.json             # schema_version, project id (entity state is JSON)
   runs/<run_id>/
     run.json
     team.json
@@ -1829,6 +1831,8 @@ GUI never embeds orchestration logic.
   logs/
   lazyorch.db              # optional index
 ```
+
+**Entity vs config format:** durable entity blobs (project, run, team, gates, tasks, plan) are **JSON** for simple atomic I/O and schema_version stamping. Operator-facing config remains **YAML** (`config.yml`, user-level `global.yml`). Migrations: `schema_version` in `project.json`; forward-only.
 
 Plans: **default local-only** (`planning.commit_to_git: false`). Optional commit for audit.
 
@@ -2008,7 +2012,7 @@ erDiagram
   RUN ||--o| CONTEXT_KV : has
 ```
 
-Migrations: `schema_version` in `project.yml`; forward-only; never auto-delete worktrees without tombstone.
+Migrations: `schema_version` in `project.json`; forward-only; never auto-delete worktrees without tombstone.
 
 ---
 

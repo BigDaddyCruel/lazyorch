@@ -5,6 +5,9 @@ export const ID_PREFIXES = ["run", "tsk", "agt", "gate", "iss", "plan"] as const
 
 export type IdPrefix = (typeof ID_PREFIXES)[number];
 
+/** Full id format: `{prefix}_{24 lowercase hex chars}` (12 random bytes). */
+const ID_SUFFIX_RE = /^[0-9a-f]{24}$/;
+
 const PREFIX_SET = new Set<string>(ID_PREFIXES);
 
 /**
@@ -16,22 +19,21 @@ export function generateId(prefix: IdPrefix): string {
   return `${prefix}_${suffix}`;
 }
 
-/** True if `id` starts with a known LazyOrch prefix and has a non-empty suffix. */
+/**
+ * True if `id` matches `{prefix}_{24 hex}` for a known (or specified) prefix.
+ */
 export function isPrefixedId(id: string, prefix?: IdPrefix): boolean {
-  if (prefix !== undefined) {
-    return id.startsWith(`${prefix}_`) && id.length > prefix.length + 1;
-  }
-  const underscore = id.indexOf("_");
-  if (underscore <= 0) return false;
-  const p = id.slice(0, underscore);
-  return PREFIX_SET.has(p) && id.length > underscore + 1;
+  return parseIdPrefix(id) !== null && (prefix === undefined || id.startsWith(`${prefix}_`));
 }
 
-/** Parse prefix from an id, or null if invalid. */
+/**
+ * Parse prefix from a strictly formatted id (`{prefix}_{24 hex}`), or null if invalid.
+ */
 export function parseIdPrefix(id: string): IdPrefix | null {
   const underscore = id.indexOf("_");
   if (underscore <= 0) return null;
   const p = id.slice(0, underscore);
-  if (!PREFIX_SET.has(p) || id.length <= underscore + 1) return null;
+  const suffix = id.slice(underscore + 1);
+  if (!PREFIX_SET.has(p) || !ID_SUFFIX_RE.test(suffix)) return null;
   return p as IdPrefix;
 }

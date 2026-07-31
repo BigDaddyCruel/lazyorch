@@ -117,6 +117,8 @@ export class StateStore {
       const task = await readJsonFile<Task>(join(dir, name));
       if (task) tasks.push(task);
     }
+    // Deterministic order for schedulers/tests (readdir is FS-dependent).
+    tasks.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     return tasks;
   }
 

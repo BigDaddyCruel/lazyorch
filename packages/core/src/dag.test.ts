@@ -43,9 +43,26 @@ describe("hasCycle", () => {
     expect(hasCycle(nodes)).toBe(false);
   });
 
+  it("returns false for a diamond DAG", () => {
+    // a → b → d, a → c → d
+    const nodes = [
+      node("a"),
+      node("b", ["a"]),
+      node("c", ["a"]),
+      node("d", ["b", "c"]),
+    ];
+    expect(hasCycle(nodes)).toBe(false);
+    expect(topologicalSort(nodes)).toEqual(["a", "b", "c", "d"]);
+  });
+
   it("returns true for a simple cycle", () => {
     const nodes = [node("a", ["b"]), node("b", ["a"])];
     expect(hasCycle(nodes)).toBe(true);
+  });
+
+  it("returns true for a self-loop", () => {
+    expect(hasCycle([node("a", ["a"])])).toBe(true);
+    expect(() => topologicalSort([node("a", ["a"])])).toThrow(DagError);
   });
 
   it("returns true for a longer cycle", () => {
@@ -60,6 +77,22 @@ describe("hasCycle", () => {
   it("returns false for empty / single node", () => {
     expect(hasCycle([])).toBe(false);
     expect(hasCycle([node("only")])).toBe(false);
+  });
+
+  it("throws duplicate_id (same as topologicalSort)", () => {
+    const dup = [node("a"), node("a")];
+    expect(() => hasCycle(dup)).toThrow(DagError);
+    expect(() => topologicalSort(dup)).toThrow(DagError);
+    try {
+      hasCycle(dup);
+    } catch (e) {
+      expect((e as DagError).code).toBe("duplicate_id");
+    }
+    try {
+      topologicalSort(dup);
+    } catch (e) {
+      expect((e as DagError).code).toBe("duplicate_id");
+    }
   });
 });
 

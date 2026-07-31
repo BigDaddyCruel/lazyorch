@@ -16,9 +16,17 @@ const DONE_LIKE: ReadonlySet<TaskStatus> = new Set(["done", "cancelled"]);
 /**
  * Detect whether the dependency graph has a cycle.
  * Unknown depends_on targets are ignored for cycle detection (reported by topo sort).
+ * Throws DagError(`duplicate_id`) if ids are not unique (same contract as topologicalSort).
  */
 export function hasCycle(nodes: readonly TaskNode[]): boolean {
-  const ids = new Set(nodes.map((n) => n.id));
+  const ids = new Set<string>();
+  for (const n of nodes) {
+    if (ids.has(n.id)) {
+      throw new DagError("duplicate_id", `Duplicate task id: ${n.id}`);
+    }
+    ids.add(n.id);
+  }
+
   const adj = new Map<string, string[]>();
   for (const n of nodes) {
     adj.set(
