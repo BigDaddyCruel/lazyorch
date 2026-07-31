@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "adapter_id": "agy",
+  "mode": "fake",
+  "description": "Record/replay sample for Agy (fake mode; no live LLM).",
+  "session": {
+    "model": "agy-m",
+    "model_tier": "medium",
+    "role": "worker",
+    "session_kind": "llm"
+  },
+  "recorded_start": {
+    "adapter_id": "agy",
+    "run_handle": "{run_handle}",
+    "argv": [
+      "/bin/agy",
+      "--model",
+      "agy-m",
+      "{prompt_file}"
+    ],
+    "cwd": "{cwd}",
+    "model": "agy-m",
+    "prompt_file": "{prompt_file}",
+    "session_dir": "{session_dir}",
+    "started_at": "2026-01-01T00:00:00.000Z",
+    "mode": "fake"
+  },
+  "session_result": {
+    "status": "ok",
+    "exit_code": 0,
+    "adapter_id": "agy",
+    "model_used": "agy-m",
+    "summary": "fake agy completed",
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 20
+    }
+  }
+}
