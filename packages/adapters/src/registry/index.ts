@@ -1,5 +1,5 @@
 /**
- * Adapter registry + discovery (PR-08).
+ * Adapter registry + discovery (PR-08) + coding adapter create path (PR-09).
  */
 
 export type {

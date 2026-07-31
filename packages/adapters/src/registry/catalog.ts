@@ -1,6 +1,6 @@
 /**
  * Builtin first-class adapter catalog (claude, codex, agy, grok, shell).
- * Candidates and thin capability defaults; deep usage/model list is PR-09/22.
+ * Candidates + capability defaults. Coding start depth is PR-09 (CodingCliAdapter).
  */
 
 import type { ModelTier } from "@lazyorch/shared";
@@ -99,9 +99,9 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.claude },
       effort_flag: true,
-      usage_reporting: "none",
+      usage_reporting: "tokens",
     }),
-    // Thin argv template (no shell redirects). PR-09 deepens vendor flags/usage.
+    // Catalog template mirrors CodingCliAdapter profile (user may override).
     start_template:
       "{binary} --model {model} --print --permission-mode bypassPermissions {prompt_file}",
   },
@@ -113,7 +113,7 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
     version_args: ["--version"],
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.codex },
-      usage_reporting: "none",
+      usage_reporting: "tokens",
     }),
     start_template: "{binary} exec --model {model} {prompt_file}",
   },
@@ -138,7 +138,7 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
     version_args: ["--version"],
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.grok },
-      usage_reporting: "none",
+      usage_reporting: "tokens",
     }),
     start_template: "{binary} --model {model} {prompt_file}",
   },
