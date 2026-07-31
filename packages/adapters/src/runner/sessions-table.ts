@@ -1,11 +1,50 @@
 /**
  * runs/<run_id>/sessions.json — pid table for orphan reaping and slot accounting.
+ *
+ * Mutations are serialized per path with an in-process mutex chain so concurrent
+ * session starts/exits cannot drop entries (load-mutate-save race).
  */
 
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { SessionRecord, SessionsFile } from "../types.js";
+
+/** Per absolute sessions.json path mutex chain. */
+const pathLocks = new Map<string, Promise<unknown>>();
+
+function lockKey(sessionsPath: string): string {
+  return resolve(sessionsPath);
+}
+
+async function withSessionsLock<T>(
+  sessionsPath: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = lockKey(sessionsPath);
+  const prev = pathLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  pathLocks.set(
+    key,
+    prev.then(
+      () => gate,
+      () => gate,
+    ),
+  );
+  await prev.catch(() => undefined);
+  try {
+    return await fn();
+  } finally {
+    release();
+    // Drop settled head to avoid unbounded growth when idle
+    if (pathLocks.get(key) === gate) {
+      // leave placeholder until next waiter; GC when chain completes
+    }
+  }
+}
 
 export function sessionsFilePath(runDir: string): string {
   return join(runDir, "sessions.json");
@@ -66,9 +105,11 @@ export async function registerSession(
   sessionsPath: string,
   record: SessionRecord,
 ): Promise<void> {
-  const file = await readSessionsFile(sessionsPath);
-  file.sessions[record.run_handle] = record;
-  await writeSessionsFile(sessionsPath, file);
+  await withSessionsLock(sessionsPath, async () => {
+    const file = await readSessionsFile(sessionsPath);
+    file.sessions[record.run_handle] = record;
+    await writeSessionsFile(sessionsPath, file);
+  });
 }
 
 /** Update status / ended_at for a session. No-op if missing. */
@@ -77,11 +118,13 @@ export async function updateSessionRecord(
   runHandle: string,
   patch: Partial<Pick<SessionRecord, "status" | "ended_at" | "pid">>,
 ): Promise<void> {
-  const file = await readSessionsFile(sessionsPath);
-  const existing = file.sessions[runHandle];
-  if (!existing) return;
-  file.sessions[runHandle] = { ...existing, ...patch };
-  await writeSessionsFile(sessionsPath, file);
+  await withSessionsLock(sessionsPath, async () => {
+    const file = await readSessionsFile(sessionsPath);
+    const existing = file.sessions[runHandle];
+    if (!existing) return;
+    file.sessions[runHandle] = { ...existing, ...patch };
+    await writeSessionsFile(sessionsPath, file);
+  });
 }
 
 /** Remove a session entry after reaping / cleanup. */
@@ -89,10 +132,12 @@ export async function clearSession(
   sessionsPath: string,
   runHandle: string,
 ): Promise<void> {
-  const file = await readSessionsFile(sessionsPath);
-  if (!(runHandle in file.sessions)) return;
-  delete file.sessions[runHandle];
-  await writeSessionsFile(sessionsPath, file);
+  await withSessionsLock(sessionsPath, async () => {
+    const file = await readSessionsFile(sessionsPath);
+    if (!(runHandle in file.sessions)) return;
+    delete file.sessions[runHandle];
+    await writeSessionsFile(sessionsPath, file);
+  });
 }
 
 /** Count currently running sessions (slots_used). */

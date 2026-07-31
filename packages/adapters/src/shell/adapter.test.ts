@@ -146,4 +146,22 @@ describe("ShellAdapter", () => {
     await agent.wait();
     await a.cancel(agent.run_handle); // already finished — no-op
   });
+
+  it("maps signal-killed exit to cancelled (not error)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lazyorch-shell-"));
+    tempDirs.push(dir);
+    const spawnImpl: SpawnImpl = async () => ({
+      pid: 99,
+      wait: async () => ({ exit_code: null, signal: "SIGTERM" }),
+      kill: () => undefined,
+    });
+    const a = createShellAdapter({
+      spawnImpl,
+      allowlist: { allowed_commands: ["node"], deny_patterns: [] },
+    });
+    const agent = await a.start(detSession(dir, ["node", "-e", "1"]));
+    const result = await agent.wait();
+    expect(result.status).toBe("cancelled");
+    expect(result.exit_code).toBeUndefined();
+  });
 });

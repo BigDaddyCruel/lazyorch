@@ -14,6 +14,22 @@ export type MappedTaskStatus =
   | "in_progress"
   | "cancelled";
 
+/**
+ * Known cancel reasons for session → task mapping.
+ * - replan_supersede: keep task in_progress (replan owns the edge)
+ * - run_cancel / budget_hard_stop / user: terminal cancel task
+ * - preempt / other transient: requeue with attempt++
+ */
+export type CancelReason =
+  | "replan_supersede"
+  | "run_cancel"
+  | "budget_hard_stop"
+  | "user"
+  | "preempt"
+  | "cancel"
+  | "cancel_all"
+  | (string & {});
+
 export type TaskFsmEffect =
   | {
       kind: "transition";
@@ -37,10 +53,51 @@ export interface MapResultOptions {
   attempt?: number;
   max_attempts?: number;
   /**
-   * Cancel reason when status is cancelled.
-   * "replan_supersede" keeps task in_progress semantics for replan.
+   * Cancel reason when status is cancelled (from ManagedRunningAgent.cancel).
+   * See mapCancelEffect for taxonomy.
    */
-  cancel_reason?: string;
+  cancel_reason?: CancelReason;
+}
+
+/** Terminal cancel reasons → task cancelled (no attempt++). */
+const TERMINAL_CANCEL_REASONS = new Set([
+  "run_cancel",
+  "budget_hard_stop",
+  "user",
+]);
+
+/**
+ * Map cancel status + reason to a task FSM effect (shared by all roles with tasks).
+ */
+export function mapCancelEffect(
+  cancel_reason: CancelReason | undefined,
+  role: string,
+): TaskFsmEffect {
+  const reason = cancel_reason ?? "cancel";
+
+  if (reason === "replan_supersede") {
+    return {
+      kind: "stay",
+      status_hint: "in_progress",
+      reason: "cancelled for replan supersede",
+    };
+  }
+
+  if (TERMINAL_CANCEL_REASONS.has(reason)) {
+    return {
+      kind: "transition",
+      to: "cancelled",
+      reason: `${role} cancelled (${reason})`,
+    };
+  }
+
+  // preempt, cancel, cancel_all, unknown → requeue (transient)
+  return {
+    kind: "transition",
+    to: "ready",
+    increment_attempt: true,
+    reason: `${role} cancelled (${reason})`,
+  };
 }
 
 /**
@@ -52,7 +109,6 @@ export function mapSessionResultToTaskEffect(
 ): TaskFsmEffect {
   const {
     role,
-    session_kind,
     result,
     invalid_parse_count = 0,
     attempt = 0,
@@ -71,9 +127,10 @@ export function mapSessionResultToTaskEffect(
     };
   }
 
-  // Deterministic / shell: ok iff exit 0; no LLM decision required unless present
-  if (session_kind === "deterministic" && role === "worker") {
-    return mapWorker(result, attempt, max_attempts);
+  // Cancel mapping is role-agnostic for workers; apply before role mappers
+  // so replan_supersede / terminal reasons are never skipped (Issue 1 / 5).
+  if (result.status === "cancelled" && role === "worker") {
+    return mapCancelEffect(cancel_reason, "worker");
   }
 
   if (role === "worker") {
@@ -81,14 +138,14 @@ export function mapSessionResultToTaskEffect(
   }
 
   if (role === "reviewer") {
-    return mapReviewer(result, invalid_parse_count);
+    return mapReviewer(result, invalid_parse_count, cancel_reason);
   }
 
   if (role === "qa") {
-    return mapQa(result, invalid_parse_count);
+    return mapQa(result, invalid_parse_count, cancel_reason);
   }
 
-  // timeout / stall on any role
+  // timeout / stall on any other role
   if (result.status === "timeout" || result.status === "stall") {
     return {
       kind: "transition",
@@ -99,19 +156,7 @@ export function mapSessionResultToTaskEffect(
   }
 
   if (result.status === "cancelled") {
-    if (cancel_reason === "replan_supersede") {
-      return {
-        kind: "stay",
-        status_hint: "in_progress",
-        reason: "cancelled for replan supersede",
-      };
-    }
-    return {
-      kind: "transition",
-      to: "ready",
-      increment_attempt: true,
-      reason: "session cancelled",
-    };
+    return mapCancelEffect(cancel_reason, role);
   }
 
   return { kind: "none", reason: `no mapping for role ${role}` };
@@ -122,15 +167,7 @@ function mapWorker(
   attempt: number,
   max_attempts: number,
 ): TaskFsmEffect {
-  if (result.status === "cancelled") {
-    return {
-      kind: "transition",
-      to: "ready",
-      increment_attempt: true,
-      reason: "worker cancelled",
-    };
-  }
-
+  // cancelled handled by caller via mapCancelEffect
   if (
     result.status === "timeout" ||
     result.status === "stall" ||
@@ -157,6 +194,7 @@ function mapWorker(
       return requeueOrFail(attempt, max_attempts, "worker submitted: false");
     }
     // exit 0 with no error marker → submit
+    // Note: exit_code null (signal) is not treated as ok — shell maps that to cancelled.
     if (result.exit_code === undefined || result.exit_code === 0) {
       return {
         kind: "transition",
@@ -199,12 +237,28 @@ function requeueOrFail(
 function mapReviewer(
   result: SessionResult,
   invalid_parse_count: number,
+  cancel_reason?: CancelReason,
 ): TaskFsmEffect {
+  if (result.status === "cancelled") {
+    // Terminal run/user/budget cancel: leave task cancelled path to scheduler;
+    // otherwise stay in review so job can be reassigned.
+    if (
+      cancel_reason &&
+      TERMINAL_CANCEL_REASONS.has(cancel_reason)
+    ) {
+      return mapCancelEffect(cancel_reason, "reviewer");
+    }
+    return {
+      kind: "stay",
+      status_hint: "review",
+      reason: `reviewer cancelled; requeue review job`,
+    };
+  }
+
   if (
     result.status === "timeout" ||
     result.status === "stall" ||
-    result.status === "error" ||
-    result.status === "cancelled"
+    result.status === "error"
   ) {
     return {
       kind: "stay",
@@ -246,12 +300,25 @@ function mapReviewer(
 function mapQa(
   result: SessionResult,
   invalid_parse_count: number,
+  cancel_reason?: CancelReason,
 ): TaskFsmEffect {
+  if (result.status === "cancelled") {
+    if (
+      cancel_reason &&
+      TERMINAL_CANCEL_REASONS.has(cancel_reason)
+    ) {
+      return mapCancelEffect(cancel_reason, "qa");
+    }
+    return {
+      kind: "stay",
+      reason: "qa cancelled; retry job",
+    };
+  }
+
   if (
     result.status === "timeout" ||
     result.status === "stall" ||
-    result.status === "error" ||
-    result.status === "cancelled"
+    result.status === "error"
   ) {
     return {
       kind: "stay",

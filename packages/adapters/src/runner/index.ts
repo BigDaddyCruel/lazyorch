@@ -21,10 +21,12 @@ export {
 
 export {
   mapSessionResultToTaskEffect,
+  mapCancelEffect,
   decisionSummary,
   type TaskFsmEffect,
   type MappedTaskStatus,
   type MapResultOptions,
+  type CancelReason,
 } from "./result-map.js";
 
 export {

@@ -136,14 +136,12 @@ export class ShellAdapter implements AgentAdapter {
     const log_path = join(session.session_dir, "stdio.log");
     await mkdir(session.session_dir, { recursive: true });
 
-    const env = scrubEnv({
+    // Scrub secrets from process.env + session.env. Never forward LAZYORCH_*,
+    // GH_TOKEN, API keys, etc. (session_kind is already on AgentSession / meta.json).
+    const cleanEnv = scrubEnv({
       ...process.env,
       ...session.env,
-      // Force no model identity for shell
-      LAZYORCH_SESSION_KIND: "deterministic",
     });
-    // Scrub again after merge (process.env may contain secrets)
-    const cleanEnv = scrubEnv(env);
 
     let spawned: SpawnedProcess;
     try {
@@ -186,20 +184,38 @@ export class ShellAdapter implements AgentAdapter {
       log_path,
       wait: async (): Promise<SessionResult> => {
         try {
-          const { exit_code } = await spawned.wait();
-          const code = exit_code ?? 1;
-          const status = code === 0 ? "ok" : "error";
-          const result: SessionResult = {
+          const { exit_code, signal } = await spawned.wait();
+          // Signal-killed (cancel/timeout tree-kill) → cancelled, not generic error.
+          // Runner still overrides when it wins the timeout/stall/cancel race.
+          if (signal !== null && (exit_code === null || exit_code !== 0)) {
+            const result: SessionResult = {
+              status: "cancelled",
+              adapter_id: this.id,
+              model_used: "n/a",
+              summary: `shell command killed by signal ${signal}`,
+            };
+            if (exit_code !== null) result.exit_code = exit_code;
+            return result;
+          }
+          if (exit_code === null) {
+            return {
+              status: "cancelled",
+              adapter_id: this.id,
+              model_used: "n/a",
+              summary: "shell command exited without code (signal)",
+            };
+          }
+          const status = exit_code === 0 ? "ok" : "error";
+          return {
             status,
-            exit_code: code,
+            exit_code,
             adapter_id: this.id,
             model_used: "n/a",
             summary:
               status === "ok"
                 ? "shell command exited 0"
-                : `shell command exited ${code}`,
+                : `shell command exited ${exit_code}`,
           };
-          return result;
         } finally {
           this.live.delete(run_handle);
         }

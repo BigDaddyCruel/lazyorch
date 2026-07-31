@@ -1,6 +1,13 @@
 /**
  * Shell adapter allowlist + deny_patterns (design-lazyorch KD-23).
  * Deterministic sessions only: command argv must pass before spawn.
+ *
+ * **Not a sandbox.** Basename allowlist gates which binaries may run; once a
+ * binary is allowed (`node`, `npm`, `pnpm`, `npx`, …), arbitrary argv (including
+ * `node -e`, `npm exec`, `npx`) is permitted unless a deny_pattern matches.
+ * Outside-allowlist → approval_policy / gate is a scheduler concern (not here).
+ * Optional strict deny patterns (e.g. for `node -e`) may be added in project
+ * config; they are not defaults so tests and acceptance scripts keep working.
  */
 
 import { basename } from "node:path";

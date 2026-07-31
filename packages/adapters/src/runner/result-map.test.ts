@@ -71,6 +71,51 @@ describe("mapSessionResultToTaskEffect — worker", () => {
       increment_attempt: true,
     });
   });
+
+  it("maps replan_supersede cancel → stay in_progress (no attempt++)", () => {
+    const e = mapSessionResultToTaskEffect({
+      role: "worker",
+      session_kind: "llm",
+      result: result({ status: "cancelled" }),
+      cancel_reason: "replan_supersede",
+    });
+    expect(e).toEqual({
+      kind: "stay",
+      status_hint: "in_progress",
+      reason: "cancelled for replan supersede",
+    });
+    expect(e).not.toHaveProperty("increment_attempt");
+  });
+
+  it("maps run_cancel / budget_hard_stop / user → task cancelled", () => {
+    for (const reason of ["run_cancel", "budget_hard_stop", "user"] as const) {
+      const e = mapSessionResultToTaskEffect({
+        role: "worker",
+        session_kind: "deterministic",
+        result: result({ status: "cancelled" }),
+        cancel_reason: reason,
+      });
+      expect(e).toMatchObject({
+        kind: "transition",
+        to: "cancelled",
+      });
+      expect(e).not.toHaveProperty("increment_attempt", true);
+    }
+  });
+
+  it("maps generic cancel → requeue with attempt++", () => {
+    const e = mapSessionResultToTaskEffect({
+      role: "worker",
+      session_kind: "llm",
+      result: result({ status: "cancelled" }),
+      cancel_reason: "preempt",
+    });
+    expect(e).toMatchObject({
+      kind: "transition",
+      to: "ready",
+      increment_attempt: true,
+    });
+  });
 });
 
 describe("mapSessionResultToTaskEffect — reviewer", () => {

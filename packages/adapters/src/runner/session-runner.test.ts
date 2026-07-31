@@ -167,6 +167,47 @@ describe("SessionRunner + real short shell", () => {
       to: "integrating",
     });
   });
+
+  it("parses last stdout JSON line when no result.json (reviewer)", async () => {
+    const runDir = await makeRunDir();
+    const sessionDir = join(runDir, "sessions", "ses_stdout");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(sessionDir, { recursive: true });
+
+    const shell = createShellAdapter({
+      allowlist: { allowed_commands: ["node"], deny_patterns: [] },
+    });
+    const runner = createSessionRunner({
+      run_dir: runDir,
+      run_id: "run_test",
+      getAdapter: () => shell,
+      cancel_grace_ms: 0,
+      enable_stall: false,
+    });
+
+    // Print noise then a decision JSON line — no result.json
+    const managed = await runner.start({
+      session: baseSession({
+        role: "reviewer",
+        role_prompt: "Review",
+        cwd: sessionDir,
+        command: [
+          process.execPath,
+          "-e",
+          `console.log('noise'); console.log(JSON.stringify({ kind: 'review', decision: 'approve' }));`,
+        ],
+      }),
+      run_handle: "ses_stdout",
+    });
+
+    const result = await managed.wait();
+    expect(result.status).toBe("ok");
+    expect(result.decision).toEqual({ kind: "review", decision: "approve" });
+    expect(managed.taskEffect()).toMatchObject({
+      kind: "transition",
+      to: "integrating",
+    });
+  });
 });
 
 describe("SessionRunner with fake processes", () => {
@@ -386,6 +427,121 @@ describe("SessionRunner with fake processes", () => {
     await expect(
       runner.start({ session: baseSession() }),
     ).rejects.toMatchObject({ code: "missing_adapter" });
+  });
+
+  it("kills process when sessions.json register fails (no orphan)", async () => {
+    const runDir = await makeRunDir();
+    let killedPid: number | undefined;
+    let cancelled = false;
+    const adapter = fakeAdapter({
+      hang: true,
+      pid: 4242,
+      onKill: () => {
+        cancelled = true;
+      },
+    });
+    // Block sessions.json writes: make sessions.json a directory so atomic write fails
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(runDir, "sessions.json"), { recursive: true });
+
+    const runner = createSessionRunner({
+      run_dir: runDir,
+      run_id: "run_test",
+      getAdapter: () => adapter,
+      cancel_grace_ms: 0,
+      enable_stall: false,
+      killTree: async (pid) => {
+        killedPid = pid;
+        cancelled = true;
+      },
+    });
+
+    await expect(
+      runner.start({
+        session: baseSession({
+          adapter_id: "fake",
+          session_kind: "llm",
+          model: "m",
+          model_tier: "small",
+          timeout_ms: 5000,
+          command: undefined,
+        }),
+        run_handle: "ses_orphan",
+      }),
+    ).rejects.toMatchObject({ code: "register" });
+
+    expect(killedPid).toBe(4242);
+    expect(cancelled).toBe(true);
+  });
+
+  it("cancel with run_cancel maps worker to cancelled", async () => {
+    const runDir = await makeRunDir();
+    const adapter = fakeAdapter({ hang: true, pid: 3333 });
+    const runner = createSessionRunner({
+      run_dir: runDir,
+      run_id: "run_test",
+      getAdapter: () => adapter,
+      cancel_grace_ms: 0,
+      enable_stall: false,
+      killTree: async () => {
+        await adapter.cancel("ses_term");
+      },
+    });
+
+    const managed = await runner.start({
+      session: baseSession({
+        adapter_id: "fake",
+        session_kind: "llm",
+        model: "m",
+        model_tier: "small",
+        timeout_ms: 60_000,
+        command: undefined,
+      }),
+      run_handle: "ses_term",
+    });
+
+    const waitP = managed.wait();
+    await managed.cancel("run_cancel");
+    const result = await waitP;
+    expect(result.status).toBe("cancelled");
+    expect(managed.taskEffect()).toMatchObject({
+      kind: "transition",
+      to: "cancelled",
+    });
+  });
+
+  it("cancel grace ends early when pid is already dead", async () => {
+    const runDir = await makeRunDir();
+    const adapter = fakeAdapter({ hang: true, pid: 1111 });
+    const start = Date.now();
+    const runner = createSessionRunner({
+      run_dir: runDir,
+      run_id: "run_test",
+      getAdapter: () => adapter,
+      cancel_grace_ms: 5_000,
+      enable_stall: false,
+      isPidAlive: () => false,
+      killTree: async () => {
+        await adapter.cancel("ses_grace");
+      },
+    });
+
+    const managed = await runner.start({
+      session: baseSession({
+        adapter_id: "fake",
+        session_kind: "llm",
+        model: "m",
+        model_tier: "small",
+        timeout_ms: 60_000,
+        command: undefined,
+      }),
+      run_handle: "ses_grace",
+    });
+
+    const waitP = managed.wait();
+    await managed.cancel("user");
+    await waitP;
+    expect(Date.now() - start).toBeLessThan(2_000);
   });
 });
 

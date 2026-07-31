@@ -3,10 +3,15 @@
  * Owns: materialize prompt/meta, sessions.json pid table, timeout/stall,
  * process-tree cancel, result parse → task FSM mapping hooks.
  * Adapters only map AgentSession → argv/env/stdio.
+ *
+ * Stall (PR-07): log-growth only on `log_path` (and optional `stallProgress`
+ * pulse). Design also mentions task transitions; the scheduler can inject
+ * `stallProgress` that advances when the task FSM moves. Full dual-signal
+ * stall is completed when the orchestrator wires that hook.
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { killProcessTree } from "../process-tree.js";
 import { scrubEnv } from "../scrub.js";
@@ -46,7 +51,8 @@ export class SessionRunnerError extends Error {
     | "budget_hard_stop"
     | "missing_adapter"
     | "materialize"
-    | "start";
+    | "start"
+    | "register";
 
   constructor(code: SessionRunnerError["code"], message: string) {
     super(message);
@@ -65,6 +71,13 @@ export interface SessionRunnerOptions {
   cancel_grace_ms?: number;
   /** Poll interval for stall log growth (ms). Default 250. */
   stall_poll_ms?: number;
+  /**
+   * Optional progress pulse for stall detection (in addition to log size).
+   * Return a number/string that changes when the session makes progress
+   * (e.g. last task FSM transition id). Unchanged for `stall_timeout_ms`
+   * + no log growth → stall. PR-07 default: log-growth only when omitted.
+   */
+  stallProgress?: () => number | string;
   skill_loader?: SkillLoader;
   skill_markdown?: Record<string, string>;
   budget?: BudgetHoursLimits;
@@ -73,6 +86,11 @@ export interface SessionRunnerOptions {
   now?: () => number;
   /** Injectable process-tree kill (tests). */
   killTree?: (pid: number) => Promise<void>;
+  /**
+   * Optional pid liveness probe during cancel grace (tests / platforms).
+   * Default: process.kill(pid, 0) style check.
+   */
+  isPidAlive?: (pid: number) => boolean;
   /**
    * When true, stall monitor is enabled (default true if stall_timeout_ms > 0).
    */
@@ -85,15 +103,17 @@ export interface StartSessionParams {
   run_handle?: string;
   /** Consecutive invalid parse count for result→FSM mapping. */
   invalid_parse_count?: number;
-  cancel_reason?: string;
 }
 
 export interface ManagedRunningAgent extends RunningAgent {
-  /** Request cancel; process-tree kill after adapter cancel best-effort. */
+  /**
+   * Request cancel; process-tree kill after adapter cancel best-effort.
+   * Pass a cancel reason for task FSM mapping, e.g.:
+   * `replan_supersede` | `run_cancel` | `budget_hard_stop` | `user` | `preempt`.
+   */
   cancel(reason?: string): Promise<void>;
   /** Result → task FSM effect after wait() settles. */
   taskEffect(): TaskFsmEffect | undefined;
-  /** Raw wait promise already started (same as wait). */
 }
 
 export interface SessionRunner {
@@ -124,11 +144,13 @@ class SessionRunnerImpl implements SessionRunner {
   private readonly stall_timeout_ms: number;
   private readonly cancel_grace_ms: number;
   private readonly stall_poll_ms: number;
+  private readonly stallProgress?: () => number | string;
   private readonly skill_loader?: SkillLoader;
   private readonly skill_markdown?: Record<string, string>;
   private readonly budget: BudgetHoursLimits;
   private readonly now: () => number;
   private readonly killTree: (pid: number) => Promise<void>;
+  private readonly isPidAlive: (pid: number) => boolean;
   private readonly enable_stall: boolean;
   private readonly live = new Map<string, ManagedState>();
 
@@ -139,6 +161,9 @@ class SessionRunnerImpl implements SessionRunner {
     this.stall_timeout_ms = options.stall_timeout_ms ?? 600_000;
     this.cancel_grace_ms = options.cancel_grace_ms ?? 30_000;
     this.stall_poll_ms = options.stall_poll_ms ?? 250;
+    if (options.stallProgress !== undefined) {
+      this.stallProgress = options.stallProgress;
+    }
     if (options.skill_loader !== undefined) {
       this.skill_loader = options.skill_loader;
     }
@@ -149,6 +174,7 @@ class SessionRunnerImpl implements SessionRunner {
     this.now = options.now ?? Date.now;
     this.killTree =
       options.killTree ?? ((pid) => killProcessTree(pid));
+    this.isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
     this.enable_stall =
       options.enable_stall ?? this.stall_timeout_ms > 0;
     this.budget_tracker =
@@ -239,6 +265,7 @@ class SessionRunnerImpl implements SessionRunner {
     }
 
     // Register in sessions.json before returning to scheduler (KD-40).
+    // If registration fails, kill the live process so we never orphan a pid.
     const record: SessionRecord = {
       run_handle,
       pid: agent.pid,
@@ -251,7 +278,27 @@ class SessionRunnerImpl implements SessionRunner {
       status: "running",
     };
     if (agent.task_id !== undefined) record.task_id = agent.task_id;
-    await registerSession(sessionsFilePath(this.run_dir), record);
+
+    try {
+      await registerSession(sessionsFilePath(this.run_dir), record);
+    } catch (err) {
+      try {
+        await adapter.cancel(run_handle);
+      } catch {
+        // best-effort
+      }
+      try {
+        await this.killTree(agent.pid);
+      } catch {
+        // best-effort
+      }
+      throw new SessionRunnerError(
+        "register",
+        `sessions.json register failed (process killed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
 
     this.budget_tracker.recordSessionStart(run_handle, started_at_ms);
 
@@ -265,9 +312,6 @@ class SessionRunnerImpl implements SessionRunner {
       cancelled: false,
       cancel: async () => undefined,
     };
-    if (params.cancel_reason !== undefined) {
-      state.cancel_reason = params.cancel_reason;
-    }
 
     const managed = this.wrapAgent(state);
     this.live.set(run_handle, state);
@@ -284,10 +328,8 @@ class SessionRunnerImpl implements SessionRunner {
       } catch {
         // best-effort
       }
-      // Cooperative grace (default 30s); tests inject cancel_grace_ms: 0.
-      if (this.cancel_grace_ms > 0) {
-        await sleep(this.cancel_grace_ms);
-      }
+      // Cooperative grace before force tree-kill; exit early if pid is dead.
+      await this.waitGraceOrDead(state.pid, this.cancel_grace_ms);
       await this.killTree(state.pid);
       state.terminalStatus = "cancelled";
     };
@@ -319,6 +361,18 @@ class SessionRunnerImpl implements SessionRunner {
       managed.task_id = state.agent.task_id;
     }
     return managed;
+  }
+
+  /** Sleep up to grace_ms, returning early when pid is no longer alive. */
+  private async waitGraceOrDead(pid: number, graceMs: number): Promise<void> {
+    if (graceMs <= 0) return;
+    const deadline = this.now() + graceMs;
+    const slice = Math.min(50, graceMs);
+    while (this.now() < deadline) {
+      if (!this.isPidAlive(pid)) return;
+      const remaining = deadline - this.now();
+      await sleep(Math.min(slice, remaining));
+    }
   }
 
   private async monitorWait(state: ManagedState): Promise<SessionResult> {
@@ -401,7 +455,7 @@ class SessionRunnerImpl implements SessionRunner {
       result = {
         status: "stall",
         adapter_id: state.agent.adapter_id,
-        summary: `session stalled (no log growth for ${this.stall_timeout_ms}ms)`,
+        summary: `session stalled (no log/progress for ${this.stall_timeout_ms}ms)`,
       };
     } else {
       result = {
@@ -411,16 +465,19 @@ class SessionRunnerImpl implements SessionRunner {
       };
     }
 
-    // Enrich with structured decision when process left artifacts.
+    // Enrich with structured decision: result.json then last stdout JSON line
+    // from stdio.log (KD-40 structured sources).
     if (result.decision === undefined) {
-      const { decision, raw_result_path } = await resolveStructuredDecision(
+      const stdout = await readLogBestEffort(state.agent.log_path);
+      const resolved = await resolveStructuredDecision(
         state.agent.session_dir,
+        stdout,
       );
-      if (decision) {
-        result = { ...result, decision };
+      if (resolved.decision) {
+        result = { ...result, decision: resolved.decision };
       }
-      if (raw_result_path) {
-        result = { ...result, raw_result_path };
+      if (resolved.raw_result_path) {
+        result = { ...result, raw_result_path: resolved.raw_result_path };
       }
     }
 
@@ -448,26 +505,43 @@ class SessionRunnerImpl implements SessionRunner {
     return result;
   }
 
+  /**
+   * Stall when neither log size nor stallProgress pulse changes for
+   * stall_timeout_ms. Log-growth-only when stallProgress is omitted (PR-07).
+   */
   private async watchStall(
     state: ManagedState,
     abort: { stopped: boolean },
   ): Promise<{ kind: "stall" }> {
     const logPath = state.agent.log_path;
     let lastSize = -1;
+    let lastPulse: number | string | undefined =
+      this.stallProgress?.() ?? undefined;
     let lastChange = this.now();
 
     while (!abort.stopped) {
+      let progressed = false;
       try {
         const s = await stat(logPath);
         if (s.size !== lastSize) {
           lastSize = s.size;
-          lastChange = this.now();
+          progressed = true;
         }
       } catch {
         if (lastSize < 0) {
           lastSize = 0;
-          lastChange = this.now();
+          progressed = true;
         }
+      }
+      if (this.stallProgress) {
+        const pulse = this.stallProgress();
+        if (pulse !== lastPulse) {
+          lastPulse = pulse;
+          progressed = true;
+        }
+      }
+      if (progressed) {
+        lastChange = this.now();
       }
       if (this.now() - lastChange >= this.stall_timeout_ms) {
         return { kind: "stall" };
@@ -509,6 +583,24 @@ interface ManagedState {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function defaultIsPidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readLogBestEffort(logPath: string): Promise<string | undefined> {
+  try {
+    return await readFile(logPath, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 /** Path helpers re-exported for callers. */

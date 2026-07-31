@@ -58,4 +58,18 @@ describe("sessions table", () => {
     file = await readSessionsFile(path);
     expect(file.sessions["b"]).toBeUndefined();
   });
+
+  it("concurrent register keeps all handles (mutex)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lazyorch-ses-"));
+    tempDirs.push(dir);
+    const path = sessionsFilePath(dir);
+    const handles = Array.from({ length: 24 }, (_, i) => `ses_${i}`);
+    await Promise.all(handles.map((h) => registerSession(path, rec(h))));
+    const file = await readSessionsFile(path);
+    for (const h of handles) {
+      expect(file.sessions[h]).toBeDefined();
+    }
+    expect(Object.keys(file.sessions)).toHaveLength(24);
+    expect(countRunningSessions(file)).toBe(24);
+  });
 });
