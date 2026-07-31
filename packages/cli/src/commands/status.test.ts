@@ -78,7 +78,7 @@ describe("runStatus", () => {
     expect(res.daemon?.url).toBe("http://127.0.0.1:7420");
   });
 
-  it("exits 3 for single-run with pending gate", async () => {
+  it("default observational: exit 0 with pending gate on single-run", async () => {
     const repo = await tempRepo();
     const store = new StateStore(join(repo, ".lazyorch"));
     const runId = "run_status2aaaaaaaaaaaaaaaaaa";
@@ -108,8 +108,43 @@ describe("runStatus", () => {
       stdout: streams.stdout,
       stderr: streams.stderr,
     });
-    expect(res.exitCode).toBe(EXIT.GATE);
+    expect(res.exitCode).toBe(EXIT.OK);
     expect(res.pendingGates).toHaveLength(1);
+  });
+
+  it("exits 3 only with gateExit / --check", async () => {
+    const repo = await tempRepo();
+    const store = new StateStore(join(repo, ".lazyorch"));
+    const runId = "run_status3aaaaaaaaaaaaaaaaaa";
+    await store.writeRun({
+      schema_version: SCHEMA_VERSION,
+      id: runId,
+      project_id: "proj_status",
+      phase: "PlanConsensus",
+      idea: "plan me",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    await store.writeGates(runId, [
+      {
+        id: "gate_statusbbbbbbbbbbbbbbbbbbb",
+        type: "plan_approve",
+        run_id: runId,
+        status: "pending",
+        created_at: "2026-01-01T00:00:00.000Z",
+        payload: { plan_id: "plan_x" },
+      },
+    ]);
+
+    const streams = capture();
+    const res = await runStatus({
+      repo,
+      runId,
+      gateExit: true,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.GATE);
   });
 
   it("errors when run missing", async () => {

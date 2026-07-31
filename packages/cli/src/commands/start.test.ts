@@ -2,8 +2,9 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
-import { SCHEMA_VERSION } from "@lazyorch/core";
+import { SCHEMA_VERSION, StateStore } from "@lazyorch/core";
 import { runStart } from "./start.js";
+import { RUN_PIN_CONTEXT_KEY, runPinFromContext } from "../run-pin.js";
 import { EXIT } from "../exit-codes.js";
 
 const temps: string[] = [];
@@ -65,6 +66,65 @@ describe("runStart", () => {
     expect(res.run?.idea).toBe("build a widget");
     const body = JSON.parse(streams.stdout.text) as { run_id: string };
     expect(body.run_id).toBe("run_aaaaaaaaaaaaaaaaaaaaaaaa");
+  });
+
+  it("stores structured ModelPin under model_pin/run", async () => {
+    const repo = await tempRepo();
+    const streams = capture();
+    const res = await runStart({
+      idea: "pinned",
+      repo,
+      tier: "large",
+      adapter: "codex",
+      nextId: () => "run_cccccccccccccccccccccccc",
+      now: () => "2026-02-01T00:00:00.000Z",
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.OK);
+    expect(res.runPin).toEqual({
+      tier_override: "large",
+      adapter_override: "codex",
+    });
+
+    const store = new StateStore(join(repo, ".lazyorch"));
+    const ctx = await store.loadOrEmptyContext("run_cccccccccccccccccccccccc");
+    expect(ctx.kv[RUN_PIN_CONTEXT_KEY]).toEqual({
+      tier_override: "large",
+      adapter_override: "codex",
+    });
+    // Consumer path for routeModel
+    expect(runPinFromContext(ctx)).toEqual({
+      tier_override: "large",
+      adapter_override: "codex",
+    });
+  });
+
+  it("rejects invalid tier", async () => {
+    const repo = await tempRepo();
+    const streams = capture();
+    const res = await runStart({
+      idea: "x",
+      repo,
+      tier: "huge",
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.USAGE);
+  });
+
+  it("rejects --yes as not implemented", async () => {
+    const repo = await tempRepo();
+    const streams = capture();
+    const res = await runStart({
+      idea: "x",
+      yes: true,
+      repo,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.USAGE);
+    expect(res.message).toBe("yes_not_implemented");
   });
 
   it("reads idea from file", async () => {

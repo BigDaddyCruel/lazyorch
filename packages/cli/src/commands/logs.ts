@@ -1,14 +1,12 @@
 /**
  * `lazyorch logs` — read durable events JSONL under `.lazyorch/events/`.
  *
- * `--follow` polls the file (simple tail); injectable read for tests.
+ * **Read-only:** never mutates event files (torn last lines are skipped in
+ * memory only). Daemon recovery may use mutate-on-read; CLI must not.
  */
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import {
-  eventJsonlPath,
-  readEventJsonl,
-  type EventEnvelope,
-} from "@lazyorch/daemon";
+import { eventJsonlPath, type EventEnvelope } from "@lazyorch/daemon";
 import { EXIT } from "../exit-codes.js";
 import { writeJson, writeLine } from "../util.js";
 
@@ -16,7 +14,10 @@ export interface LogsOptions {
   run?: string;
   /** When true, print raw JSONL lines (default pretty array once). */
   follow?: boolean;
-  /** Max events to print (default unlimited for non-follow). */
+  /**
+   * Max events to print from the end (non-follow) or stop after N (follow).
+   * `0` means print nothing.
+   */
   limit?: number;
   repo?: string;
   stdout?: NodeJS.WritableStream;
@@ -46,6 +47,52 @@ export interface LogsResult {
 }
 
 /**
+ * Read-only JSONL parse: skip corrupt / torn lines in memory only.
+ * Never writes or truncates the file.
+ */
+export async function readEventJsonlReadonly(
+  path: string,
+): Promise<EventEnvelope[]> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (err) {
+    if (isNotFound(err)) return [];
+    throw err;
+  }
+  if (raw.length === 0) return [];
+
+  const lines = raw.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+
+  const events: EventEnvelope[] = [];
+  for (const line of lines) {
+    if (line.trim() === "") continue;
+    try {
+      events.push(JSON.parse(line) as EventEnvelope);
+    } catch {
+      // Drop torn/corrupt line in memory only — do not mutate the file.
+    }
+  }
+  return events;
+}
+
+/**
+ * Apply --limit: 0 → empty; n > 0 → last n events; undefined → all.
+ */
+export function applyEventLimit(
+  events: EventEnvelope[],
+  limit: number | undefined,
+): EventEnvelope[] {
+  if (limit === undefined) return events;
+  if (limit === 0) return [];
+  if (limit < 0) return events;
+  return events.slice(-limit);
+}
+
+/**
  * Read project event log (JSONL).
  */
 export async function runLogs(options: LogsOptions = {}): Promise<LogsResult> {
@@ -66,7 +113,8 @@ export async function runLogs(options: LogsOptions = {}): Promise<LogsResult> {
     return { exitCode: EXIT.USAGE, events: [], path: "", message: msg };
   }
 
-  const reader = options.readEvents ?? readEventJsonl;
+  // Default is read-only — never call daemon readEventJsonl (mutates on torn line).
+  const reader = options.readEvents ?? readEventJsonlReadonly;
 
   if (options.follow === true) {
     return followLogs({
@@ -81,10 +129,17 @@ export async function runLogs(options: LogsOptions = {}): Promise<LogsResult> {
   }
 
   try {
-    let events = await reader(path);
-    if (options.limit !== undefined && options.limit >= 0) {
-      events = events.slice(-options.limit);
+    // --limit 0: empty result without reading when possible (still ok to read)
+    if (options.limit === 0) {
+      writeJson(
+        stdout,
+        { path, run_id: runId ?? null, count: 0, events: [] },
+        pretty,
+      );
+      return { exitCode: EXIT.OK, events: [], path };
     }
+
+    const events = applyEventLimit(await reader(path), options.limit);
     writeJson(
       stdout,
       {
@@ -112,11 +167,15 @@ async function followLogs(opts: {
   maxPolls?: number;
   limit?: number;
 }): Promise<LogsResult> {
+  // limit 0 → emit nothing immediately
+  if (opts.limit === 0) {
+    return { exitCode: EXIT.OK, events: [], path: opts.path };
+  }
+
   let seen = 0;
   let polls = 0;
   const all: EventEnvelope[] = [];
 
-  // Initial read
   try {
     const events = await opts.reader(opts.path);
     for (const ev of events) {
@@ -150,7 +209,8 @@ async function followLogs(opts: {
           }
         }
       } else {
-        seen = events.length;
+        // File may have been rewritten shorter — re-sync count carefully
+        seen = Math.min(seen, events.length);
       }
     } catch {
       /* transient read errors while following */
@@ -162,4 +222,13 @@ async function followLogs(opts: {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function isNotFound(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: unknown }).code === "ENOENT"
+  );
 }

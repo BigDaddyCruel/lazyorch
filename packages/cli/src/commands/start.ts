@@ -3,6 +3,10 @@
  *
  * Full orchestration is daemon-owned; this creates the durable run entity
  * (Inception) so operators / later ticks can proceed.
+ *
+ * Pins (`--tier|--model|--adapter`) are stored as structured `ModelPin` under
+ * context key `model_pin/run` for `routeModel({ run_pin })` consumers
+ * (see `runPinFromContext` / `models route --run`).
  */
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -12,6 +16,10 @@ import {
   type Run,
 } from "@lazyorch/core";
 import { EXIT } from "../exit-codes.js";
+import {
+  RUN_PIN_CONTEXT_KEY,
+  buildRunPin,
+} from "../run-pin.js";
 import {
   createStore,
   listAllGates,
@@ -28,11 +36,11 @@ export interface StartOptions {
   /** Soft budget USD hint stored on run context (not enforced here). */
   budgetUsd?: number;
   /**
-   * Skip gates allowlisted in config (default: none of the safety gates).
-   * Currently recorded only; auto-approve of safety gates is never done.
+   * Reserved: design allowlist auto-skip is not implemented.
+   * Passing --yes is rejected (exit 2) so operators are not misled.
    */
   yes?: boolean;
-  /** Pin tier / model / adapter (stored in context for router). */
+  /** Pin tier / model / adapter → context `model_pin/run` (ModelPin). */
   tier?: string;
   model?: string;
   adapter?: string;
@@ -51,6 +59,7 @@ export interface StartResult {
   run?: Run;
   message?: string;
   pendingGates?: number;
+  runPin?: ReturnType<typeof buildRunPin>;
 }
 
 async function loadProjectId(repo: string): Promise<string | null> {
@@ -76,6 +85,13 @@ export async function runStart(options: StartOptions = {}): Promise<StartResult>
   const pretty = options.pretty !== false;
   const repo = resolve(options.repo ?? process.cwd());
 
+  if (options.yes === true) {
+    stderr.write(
+      "error: --yes is not implemented (gate allowlist auto-skip deferred); omit the flag\n",
+    );
+    return { exitCode: EXIT.USAGE, message: "yes_not_implemented" };
+  }
+
   let idea = options.idea?.trim() ?? "";
   if (options.ideaFile) {
     try {
@@ -99,8 +115,22 @@ export async function runStart(options: StartOptions = {}): Promise<StartResult>
     return { exitCode: EXIT.ERROR, message: "no_project" };
   }
 
+  let runPin: ReturnType<typeof buildRunPin> = null;
+  try {
+    runPin = buildRunPin({
+      ...(options.tier !== undefined ? { tier: options.tier } : {}),
+      ...(options.model !== undefined ? { model: options.model } : {}),
+      ...(options.adapter !== undefined ? { adapter: options.adapter } : {}),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr.write(`error: ${msg}\n`);
+    return { exitCode: EXIT.USAGE, message: msg };
+  }
+
+  const store = createStore(repo);
   // Pending gates on other runs do not block start; only report.
-  const pending = await listAllGates(createStore(repo), { status: "pending" });
+  const pending = await listAllGates(store, { status: "pending" });
 
   const ts = options.now?.() ?? new Date().toISOString();
   const id = options.nextId?.() ?? generateId("run");
@@ -114,33 +144,15 @@ export async function runStart(options: StartOptions = {}): Promise<StartResult>
     updated_at: ts,
   };
 
-  const store = createStore(repo);
   await store.writeRun(run);
   await store.writeGates(run.id, []);
 
-  // Optional pins / budget into context
-  if (
-    options.budgetUsd !== undefined ||
-    options.tier ||
-    options.model ||
-    options.adapter ||
-    options.yes === true
-  ) {
-    if (options.budgetUsd !== undefined) {
-      await store.setContextKey(run.id, "budget_usd", options.budgetUsd);
-    }
-    if (options.tier) {
-      await store.setContextKey(run.id, "model_pin/run_tier", options.tier);
-    }
-    if (options.model) {
-      await store.setContextKey(run.id, "model_pin/run_model", options.model);
-    }
-    if (options.adapter) {
-      await store.setContextKey(run.id, "model_pin/run_adapter", options.adapter);
-    }
-    if (options.yes === true) {
-      await store.setContextKey(run.id, "start_yes", true);
-    }
+  if (options.budgetUsd !== undefined) {
+    await store.setContextKey(run.id, "budget_usd", options.budgetUsd);
+  }
+  if (runPin) {
+    // Structured ModelPin for routeModel({ run_pin: … })
+    await store.setContextKey(run.id, RUN_PIN_CONTEXT_KEY, runPin);
   }
 
   writeJson(
@@ -152,7 +164,7 @@ export async function runStart(options: StartOptions = {}): Promise<StartResult>
       phase: run.phase,
       idea: run.idea,
       pending_gates_elsewhere: pending.length,
-      yes: options.yes === true,
+      run_pin: runPin,
     },
     pretty,
   );
@@ -164,5 +176,10 @@ export async function runStart(options: StartOptions = {}): Promise<StartResult>
     );
   }
 
-  return { exitCode: EXIT.OK, run, pendingGates: pending.length };
+  return {
+    exitCode: EXIT.OK,
+    run,
+    pendingGates: pending.length,
+    ...(runPin ? { runPin } : {}),
+  };
 }

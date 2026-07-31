@@ -1,6 +1,8 @@
 /**
  * `lazyorch status [run_id]` — overview of local runs + pending gates.
- * Optionally attaches daemon status when ensureDaemon is provided / available.
+ *
+ * Observational: default exit 0 even when gates are pending.
+ * Opt-in exit 3 with `--gate-exit` / `gateExit: true` (CI check).
  */
 import { resolve } from "node:path";
 import type { Gate, Run } from "@lazyorch/core";
@@ -16,7 +18,10 @@ export interface StatusOptions {
   /** Optional run id (positional). */
   runId?: string;
   repo?: string;
-  /** When true, exit 3 if any pending gates (default true for single-run). */
+  /**
+   * When true, exit 3 if any pending gates (default false — observational).
+   * CLI flag: --gate-exit / --check
+   */
   gateExit?: boolean;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -120,14 +125,8 @@ export async function runStatus(
 
   writeJson(stdout, payload, pretty);
 
-  // Exit 3 when command cannot proceed because a gate is pending.
-  // For global status: only when gateExit true (default when run_id set).
-  const gateExit =
-    options.gateExit !== undefined
-      ? options.gateExit
-      : Boolean(options.runId);
-
-  if (gateExit && pendingGates.length > 0) {
+  // Exit 3 only when explicitly requested (--gate-exit / --check).
+  if (options.gateExit === true && pendingGates.length > 0) {
     return {
       exitCode: EXIT.GATE,
       runs,

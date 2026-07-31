@@ -1,7 +1,7 @@
 /**
  * `lazyorch gate list|approve|reject` — operator gate UX (local StateStore).
  *
- * Type-specific apply helpers used when available; otherwise generic resolveGate.
+ * Multi-outcome gates require explicit `--decision` (no silent force_approve).
  * Exit 3 from list when --check and pending gates exist.
  */
 import { resolve } from "node:path";
@@ -40,8 +40,8 @@ export interface GateCommandOptions {
   /** Show all statuses (not just pending). */
   all?: boolean;
   /**
-   * Extra action for typed gates:
-   * - plan_approve reject: cancel | revise (default cancel)
+   * Extra action for multi-outcome gates (required where applicable):
+   * - plan_approve reject: cancel | revise
    * - plan_dispute: accept_wontfix | force_addressed | abort
    * - plan_max_rounds: force_approve | edit | abort
    */
@@ -62,6 +62,35 @@ export interface GateCommandResult {
   gate?: Gate;
   run?: Run;
   message?: string;
+}
+
+const PLAN_REJECT_ACTIONS = new Set<string>(["cancel", "revise"]);
+const PLAN_DISPUTE_RESOLUTIONS = new Set<string>([
+  "accept_wontfix",
+  "force_addressed",
+  "abort",
+]);
+const PLAN_MAX_ROUNDS_ACTIONS = new Set<string>([
+  "force_approve",
+  "edit",
+  "abort",
+]);
+
+/** Allowed --decision values by gate type + approve|reject. */
+export function allowedDecisions(
+  gateType: string,
+  action: "approve" | "reject",
+): string[] | null {
+  switch (gateType) {
+    case "plan_approve":
+      return action === "reject" ? ["cancel", "revise"] : null;
+    case "plan_dispute":
+      return ["accept_wontfix", "force_addressed", "abort"];
+    case "plan_max_rounds":
+      return ["force_approve", "edit", "abort"];
+    default:
+      return null;
+  }
 }
 
 export async function runGate(
@@ -155,6 +184,23 @@ export async function runGate(
         };
       }
 
+      // Validate multi-outcome --decision before applying.
+      const decisionCheck = validateDecision(
+        found.gate.type,
+        options.action,
+        options.decision,
+      );
+      if (!decisionCheck.ok) {
+        stderr.write(`error: ${decisionCheck.message}\n`);
+        return {
+          exitCode: EXIT.USAGE,
+          action: options.action,
+          gate: found.gate,
+          run: found.run,
+          message: decisionCheck.message,
+        };
+      }
+
       try {
         const decision = options.action === "approve" ? "approve" : "reject";
         const applied = applyGateDecision({
@@ -173,7 +219,6 @@ export async function runGate(
         );
         await store.writeGates(found.run.id, nextGates);
         if (applied.run.id === found.run.id) {
-          // Persist run when phase/reasons changed
           const prev = found.run;
           const next = applied.run;
           if (
@@ -213,12 +258,7 @@ export async function runGate(
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         stderr.write(`error: ${msg}\n`);
-        // Plan FSM precondition failures → exit 5
-        if (
-          /requires PlanConsensus|requires Planning|requires MergeReady|plan_/.test(
-            msg,
-          )
-        ) {
+        if (isPlanFsmError(msg)) {
           return {
             exitCode: EXIT.PLAN,
             action: options.action,
@@ -242,6 +282,64 @@ export async function runGate(
       return { exitCode: EXIT.USAGE, action: options.action, message: "usage" };
     }
   }
+}
+
+/** Core FSM precondition failures → exit 5 (tight prefixes, not bare plan_). */
+function isPlanFsmError(msg: string): boolean {
+  return (
+    msg.startsWith("applyPlanApproveDecision") ||
+    msg.startsWith("applyPlanDisputeDecision") ||
+    msg.startsWith("applyPlanMaxRoundsDecision") ||
+    msg.startsWith("applyMergeGateDecision") ||
+    /requires PlanConsensus/.test(msg) ||
+    /requires Planning/.test(msg) ||
+    /requires MergeReady/.test(msg) ||
+    /plan_approve (approve|revise|cancel) requires/.test(msg)
+  );
+}
+
+function validateDecision(
+  gateType: string,
+  action: "approve" | "reject",
+  decision: string | undefined,
+): { ok: true } | { ok: false; message: string } {
+  const allowed = allowedDecisions(gateType, action);
+  if (allowed === null) {
+    // Binary approve/reject only — --decision optional; if present, warn? reject invalid
+    if (decision !== undefined && decision.trim() !== "") {
+      // Generic gates ignore decision; allow extra payload only — ok
+      return { ok: true };
+    }
+    return { ok: true };
+  }
+
+  // Multi-outcome: require explicit --decision
+  if (decision === undefined || decision.trim() === "") {
+    return {
+      ok: false,
+      message: `${gateType} requires --decision ${allowed.join("|")}`,
+    };
+  }
+  const d = decision.trim();
+  if (!allowed.includes(d)) {
+    return {
+      ok: false,
+      message: `invalid --decision '${d}' for ${gateType}; allowed: ${allowed.join("|")}`,
+    };
+  }
+
+  // plan_approve: approve path forbids --decision (binary)
+  if (gateType === "plan_approve" && action === "approve") {
+    // allowed is null for approve — handled above
+  }
+
+  // plan_dispute / plan_max_rounds: reject maps to abort only when decision is abort
+  // (operator must say --decision abort explicitly; already required)
+  void PLAN_REJECT_ACTIONS;
+  void PLAN_DISPUTE_RESOLUTIONS;
+  void PLAN_MAX_ROUNDS_ACTIONS;
+
+  return { ok: true };
 }
 
 interface ApplyResult {
@@ -268,35 +366,23 @@ function applyGateDecision(opts: {
         const r = applyPlanApproveDecision(run, gate, "approve", base);
         return { gate: r.gate, run: r.run };
       }
+      // decisionDetail validated as cancel|revise
       const action: PlanRejectAction =
         decisionDetail === "revise" ? "revise" : "cancel";
       const r = applyPlanApproveDecision(run, gate, "reject", {
         ...base,
         plan_reject_action: action,
       });
-      return { gate: r.gate, run: r.run };
+      return { gate: r.gate, run: r.run, note: `reject_action=${action}` };
     }
     case "plan_dispute": {
-      let resolution: PlanDisputeResolution;
-      if (decision === "reject" || decisionDetail === "abort") {
-        resolution = "abort";
-      } else if (decisionDetail === "force_addressed") {
-        resolution = "force_addressed";
-      } else {
-        resolution = "accept_wontfix";
-      }
+      // Required + validated
+      const resolution = decisionDetail as PlanDisputeResolution;
       const r = applyPlanDisputeDecision(run, gate, resolution, base);
       return { gate: r.gate, run: r.run, note: `resolution=${resolution}` };
     }
     case "plan_max_rounds": {
-      let action: PlanMaxRoundsAction;
-      if (decision === "reject" || decisionDetail === "abort") {
-        action = "abort";
-      } else if (decisionDetail === "edit") {
-        action = "edit";
-      } else {
-        action = "force_approve";
-      }
+      const action = decisionDetail as PlanMaxRoundsAction;
       const r = applyPlanMaxRoundsDecision(run, gate, action, base);
       return { gate: r.gate, run: r.run, note: `action=${action}` };
     }
@@ -313,7 +399,6 @@ function applyGateDecision(opts: {
       return out;
     }
     default: {
-      // human_intervention, budget_override, task_approve, destructive_git, …
       const status = decision === "approve" ? "approved" : "rejected";
       const nextGate = resolveGate(gate, status, {
         ...base,

@@ -62,7 +62,7 @@ export async function listRuns(store: StateStore): Promise<Run[]> {
 export async function listAllGates(
   store: StateStore,
   opts?: { status?: string; runId?: string },
-): Promise<Array<Gate & { project_run_id?: string }>> {
+): Promise<Gate[]> {
   const runIds = opts?.runId ? [opts.runId] : await listRunIds(store);
   const out: Gate[] = [];
   for (const runId of runIds) {

@@ -1,7 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, afterEach } from "vitest";
 import type { EventEnvelope } from "@lazyorch/daemon";
-import { runLogs } from "./logs.js";
+import {
+  applyEventLimit,
+  readEventJsonlReadonly,
+  runLogs,
+} from "./logs.js";
 import { EXIT } from "../exit-codes.js";
+
+const temps: string[] = [];
 
 function capture(): {
   stdout: NodeJS.WritableStream & { text: string };
@@ -34,6 +43,13 @@ const sample: EventEnvelope[] = [
   },
 ];
 
+afterEach(async () => {
+  while (temps.length > 0) {
+    const dir = temps.pop();
+    if (dir) await rm(dir, { recursive: true, force: true });
+  }
+});
+
 describe("runLogs", () => {
   it("reads events via injectable reader", async () => {
     const streams = capture();
@@ -51,7 +67,7 @@ describe("runLogs", () => {
     expect(body.count).toBe(2);
   });
 
-  it("applies limit", async () => {
+  it("applies limit 1", async () => {
     const streams = capture();
     const res = await runLogs({
       resolvePath: () => "/tmp/events.jsonl",
@@ -63,6 +79,26 @@ describe("runLogs", () => {
     expect(res.exitCode).toBe(EXIT.OK);
     expect(res.events).toHaveLength(1);
     expect(res.events[0]?.type).toBe("gate.required");
+  });
+
+  it("limit 0 means empty (not full array)", async () => {
+    const streams = capture();
+    let reads = 0;
+    const res = await runLogs({
+      resolvePath: () => "/tmp/events.jsonl",
+      readEvents: async () => {
+        reads += 1;
+        return sample;
+      },
+      limit: 0,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.OK);
+    expect(res.events).toHaveLength(0);
+    expect(JSON.parse(streams.stdout.text).count).toBe(0);
+    // short-circuit: no need to read file for limit 0
+    expect(reads).toBe(0);
   });
 
   it("follow prints JSONL lines and stops at maxPolls", async () => {
@@ -84,5 +120,32 @@ describe("runLogs", () => {
     expect(res.exitCode).toBe(EXIT.OK);
     const lines = streams.stdout.text.trim().split("\n");
     expect(lines.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("readEventJsonlReadonly", () => {
+  it("skips torn last line without mutating file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lazyorch-logs-ro-"));
+    temps.push(dir);
+    const path = join(dir, "events.jsonl");
+    const good = JSON.stringify(sample[0]);
+    const original = `${good}\n{"partial torn`;
+    await writeFile(path, original, "utf8");
+
+    const events = await readEventJsonlReadonly(path);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("phase.changed");
+
+    // File must be unchanged
+    const after = await readFile(path, "utf8");
+    expect(after).toBe(original);
+  });
+});
+
+describe("applyEventLimit", () => {
+  it("handles 0 / 1 / undefined", () => {
+    expect(applyEventLimit(sample, 0)).toEqual([]);
+    expect(applyEventLimit(sample, 1)).toHaveLength(1);
+    expect(applyEventLimit(sample, undefined)).toHaveLength(2);
   });
 });

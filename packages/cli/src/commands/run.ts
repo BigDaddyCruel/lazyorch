@@ -1,5 +1,8 @@
 /**
  * `lazyorch run list|show` — list runs / show run detail (+ gates, tasks, plan).
+ *
+ * Observational: default exit 0 even when gates are pending.
+ * Opt-in exit 3 with `--check` / `check: true`.
  */
 import { resolve } from "node:path";
 import type { Gate, Plan, Run, Task } from "@lazyorch/core";
@@ -13,6 +16,11 @@ export interface RunCommandOptions {
   /** Run id for show. */
   runId?: string;
   repo?: string;
+  /**
+   * When true, show exits 3 if pending gates (default false).
+   * CLI flag: --check / --gate-exit
+   */
+  check?: boolean;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
   pretty?: boolean;
@@ -90,7 +98,7 @@ export async function runRunCommand(
         pretty,
       );
 
-      if (pending.length > 0) {
+      if (options.check === true && pending.length > 0) {
         return {
           exitCode: EXIT.GATE,
           action: "show",

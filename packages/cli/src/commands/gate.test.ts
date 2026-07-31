@@ -133,7 +133,7 @@ describe("runGate", () => {
     expect(run?.phase).toBe("Implementing");
   });
 
-  it("rejects plan_approve → Cancelled", async () => {
+  it("rejects plan_approve with explicit --decision cancel", async () => {
     const repo = await tempRepo();
     const store = new StateStore(join(repo, ".lazyorch"));
     const runId = "run_gate3aaaaaaaaaaaaaaaaaaaa";
@@ -160,6 +160,7 @@ describe("runGate", () => {
     const res = await runGate({
       action: "reject",
       gateId: gate.id,
+      decision: "cancel",
       repo,
       now: () => "2026-02-01T12:00:00.000Z",
       stdout: streams.stdout,
@@ -168,6 +169,148 @@ describe("runGate", () => {
     expect(res.exitCode).toBe(EXIT.OK);
     expect(res.gate?.status).toBe("rejected");
     expect(res.run?.phase).toBe("Cancelled");
+  });
+
+  it("requires --decision for plan_max_rounds", async () => {
+    const repo = await tempRepo();
+    const store = new StateStore(join(repo, ".lazyorch"));
+    const runId = "run_gate5aaaaaaaaaaaaaaaaaaaa";
+    await store.writeRun({
+      schema_version: SCHEMA_VERSION,
+      id: runId,
+      project_id: "proj_gate",
+      phase: "Planning",
+      idea: "x",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const gate: Gate = {
+      id: "gate_maxroundsaaaaaaaaaaaaaaaa",
+      type: "plan_max_rounds",
+      run_id: runId,
+      status: "pending",
+      created_at: "2026-01-01T00:00:00.000Z",
+      payload: {
+        plan_id: "plan_x",
+        rounds: 3,
+        open_issues: 1,
+        actions: ["force_approve", "edit", "abort"],
+      },
+    };
+    await store.writeGates(runId, [gate]);
+
+    const streams = capture();
+    const missing = await runGate({
+      action: "approve",
+      gateId: gate.id,
+      repo,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(missing.exitCode).toBe(EXIT.USAGE);
+    expect(streams.stderr.text).toMatch(/--decision/);
+
+    streams.stderr.text = "";
+    streams.stdout.text = "";
+    const bad = await runGate({
+      action: "approve",
+      gateId: gate.id,
+      decision: "force-approve",
+      repo,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(bad.exitCode).toBe(EXIT.USAGE);
+
+    streams.stderr.text = "";
+    streams.stdout.text = "";
+    const ok = await runGate({
+      action: "approve",
+      gateId: gate.id,
+      decision: "edit",
+      repo,
+      now: () => "2026-02-01T12:00:00.000Z",
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(ok.exitCode).toBe(EXIT.OK);
+    expect(ok.gate?.status).toBe("approved");
+  });
+
+  it("plan_dispute requires --decision", async () => {
+    const repo = await tempRepo();
+    const store = new StateStore(join(repo, ".lazyorch"));
+    const runId = "run_gate6aaaaaaaaaaaaaaaaaaaa";
+    await store.writeRun({
+      schema_version: SCHEMA_VERSION,
+      id: runId,
+      project_id: "proj_gate",
+      phase: "Planning",
+      idea: "x",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const gate: Gate = {
+      id: "gate_disputeaaaaaaaaaaaaaaaaaa",
+      type: "plan_dispute",
+      run_id: runId,
+      status: "pending",
+      created_at: "2026-01-01T00:00:00.000Z",
+      payload: { plan_id: "plan_x", disputed_issue_ids: ["iss_a"] },
+    };
+    await store.writeGates(runId, [gate]);
+
+    const streams = capture();
+    const res = await runGate({
+      action: "approve",
+      gateId: gate.id,
+      decision: "accept_wontfix",
+      repo,
+      now: () => "2026-02-01T12:00:00.000Z",
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.OK);
+    expect(res.gate?.status).toBe("approved");
+  });
+
+  it("merge approve marks should_merge", async () => {
+    const repo = await tempRepo();
+    const store = new StateStore(join(repo, ".lazyorch"));
+    const runId = "run_gate7aaaaaaaaaaaaaaaaaaaa";
+    await store.writeRun({
+      schema_version: SCHEMA_VERSION,
+      id: runId,
+      project_id: "proj_gate",
+      phase: "MergeReady",
+      idea: "x",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      pr_ref: { number: 1, state: "ready" },
+    });
+    const gate: Gate = {
+      id: "gate_mergeaaaaaaaaaaaaaaaaaaaa",
+      type: "merge",
+      run_id: runId,
+      status: "pending",
+      created_at: "2026-01-01T00:00:00.000Z",
+      payload: { pr_number: 1 },
+    };
+    await store.writeGates(runId, [gate]);
+
+    const streams = capture();
+    const res = await runGate({
+      action: "approve",
+      gateId: gate.id,
+      repo,
+      now: () => "2026-02-01T12:00:00.000Z",
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.OK);
+    expect(res.gate?.status).toBe("approved");
+    const body = JSON.parse(streams.stdout.text) as { should_merge: boolean };
+    expect(body.should_merge).toBe(true);
   });
 
   it("generic approve for human_intervention", async () => {

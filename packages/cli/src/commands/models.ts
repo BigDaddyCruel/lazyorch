@@ -1,18 +1,23 @@
 /**
  * `lazyorch models route` — dry-run complexity router (no session start).
+ *
+ * Pin sources (priority): CLI flags > context `model_pin/run` when `--run` set.
  */
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import {
   dryRunRoute,
+  isModelTier,
   type ComplexitySignals,
   type DryRunRouteResult,
   type ModelPin,
+  type ModelTier,
   type PartialDeepModelsConfig,
 } from "@lazyorch/core";
 import { parseConfigYaml } from "@lazyorch/shared";
 import { EXIT } from "../exit-codes.js";
-import { writeJson } from "../util.js";
+import { runPinFromContext } from "../run-pin.js";
+import { createStore, writeJson } from "../util.js";
 
 export type ModelsSubcommand = "route";
 
@@ -22,9 +27,14 @@ export interface ModelsCommandOptions {
   role?: string;
   /** Optional task id for event payload. */
   task?: string;
+  /**
+   * Load run_pin from context `model_pin/run` for this run
+   * (written by `lazyorch start --tier|--model|--adapter`).
+   */
+  run?: string;
   /** Optional JSON signals object. */
   signalsJson?: string;
-  /** Pin overrides. */
+  /** Pin overrides (override context pin when both set). */
   tier?: string;
   model?: string;
   adapter?: string;
@@ -44,6 +54,7 @@ export interface ModelsCommandResult {
   exitCode: number;
   action: ModelsSubcommand;
   result?: DryRunRouteResult;
+  runPin?: ModelPin;
   message?: string;
 }
 
@@ -62,8 +73,31 @@ async function defaultLoadConfig(
   }
 }
 
+function pinFromFlags(opts: {
+  tier?: string;
+  model?: string;
+  adapter?: string;
+}): { ok: true; pin?: ModelPin } | { ok: false; message: string } {
+  if (!opts.tier && !opts.model && !opts.adapter) {
+    return { ok: true };
+  }
+  const pin: ModelPin = {};
+  if (opts.tier) {
+    if (!isModelTier(opts.tier)) {
+      return {
+        ok: false,
+        message: `invalid --tier '${opts.tier}' (expected nano|small|medium|large|xlarge)`,
+      };
+    }
+    pin.tier_override = opts.tier as ModelTier;
+  }
+  if (opts.model) pin.model_override = opts.model;
+  if (opts.adapter) pin.adapter_override = opts.adapter;
+  return { ok: true, pin };
+}
+
 /**
- * Run `lazyorch models route --role <role> | --task <id>`.
+ * Run `lazyorch models route --role <role> | --task <id> | --run <id>`.
  */
 export async function runModels(
   options: ModelsCommandOptions,
@@ -89,16 +123,37 @@ export async function runModels(
     }
   }
 
-  let runPin: ModelPin | undefined;
-  if (options.tier || options.model || options.adapter) {
-    runPin = {};
-    if (options.tier) {
-      runPin.tier_override = options.tier as NonNullable<
-        ModelPin["tier_override"]
-      >;
+  const flags = pinFromFlags({
+    ...(options.tier !== undefined ? { tier: options.tier } : {}),
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.adapter !== undefined ? { adapter: options.adapter } : {}),
+  });
+  if (!flags.ok) {
+    stderr.write(`error: ${flags.message}\n`);
+    return { exitCode: EXIT.USAGE, action: "route", message: flags.message };
+  }
+
+  // Context pin from start (when --run provided)
+  let contextPin: ModelPin | undefined;
+  if (options.run) {
+    const store = createStore(repo);
+    const run = await store.readRun(options.run);
+    if (!run) {
+      stderr.write(`error: run not found: ${options.run}\n`);
+      return {
+        exitCode: EXIT.ERROR,
+        action: "route",
+        message: "run_not_found",
+      };
     }
-    if (options.model) runPin.model_override = options.model;
-    if (options.adapter) runPin.adapter_override = options.adapter;
+    const ctx = await store.loadOrEmptyContext(options.run);
+    contextPin = runPinFromContext(ctx);
+  }
+
+  // CLI flags override context pin field-wise
+  let runPin: ModelPin | undefined = contextPin;
+  if (flags.pin) {
+    runPin = { ...(contextPin ?? {}), ...flags.pin };
   }
 
   const loadConfig = options.loadConfig ?? defaultLoadConfig;
@@ -126,6 +181,8 @@ export async function runModels(
         dry_run: true,
         role,
         task_id: options.task ?? null,
+        run_id: options.run ?? null,
+        run_pin: runPin ?? null,
         tier: result.tier,
         adapter_id: result.adapter_id,
         model: result.model,
@@ -143,14 +200,19 @@ export async function runModels(
         exitCode: EXIT.ADAPTER_MISSING,
         action: "route",
         result,
+        ...(runPin ? { runPin } : {}),
         message: result.error,
       };
     }
 
-    return { exitCode: EXIT.OK, action: "route", result };
+    return {
+      exitCode: EXIT.OK,
+      action: "route",
+      result,
+      ...(runPin ? { runPin } : {}),
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Adapter selection failures → exit 4
     if (/adapter|no.*available|missing.*binary/i.test(msg)) {
       stderr.write(`error: ${msg}\n`);
       return {

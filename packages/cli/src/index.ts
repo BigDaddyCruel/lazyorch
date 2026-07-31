@@ -23,6 +23,15 @@ export function cliPlaceholder(): string {
 }
 
 export { EXIT } from "./exit-codes.js";
+export {
+  RUN_PIN_CONTEXT_KEY,
+  buildRunPin,
+  runPinFromContext,
+} from "./run-pin.js";
+export {
+  readEventJsonlReadonly,
+  applyEventLimit,
+} from "./commands/logs.js";
 export { runInit, type InitOptions, type InitResult } from "./commands/init.js";
 export {
   runDoctor,
@@ -60,6 +69,7 @@ export {
 } from "./commands/run.js";
 export {
   runGate,
+  allowedDecisions,
   type GateCommandOptions,
   type GateCommandResult,
   type GateSubcommand,
@@ -92,45 +102,84 @@ Commands:
   serve     Ensure user-level daemon is running
   start     Create a run from an idea
   status    Show runs + pending gates [run_id]
-  run       Run list|show
+  run       Run list|show (alias: runs)
   gate      Gate list|approve|reject
   models    Model router dry-run (route)
   adapter   Adapter registry (list|register|test)
   context   Shared run context KV (list|get|set|delete)
-  logs      Read events JSONL
+  logs      Read events JSONL (read-only)
   help      Show this help
 
 Exit codes:
   0 ok  1 error  2 usage  3 gate required  4 adapter missing
   5 plan not consensus/validators  6 multi-PR not implemented
 
+Observational commands (status, run show, gate list) exit 0 by default when
+gates are pending. Pass --check or --gate-exit to exit 3 for CI.
+
+init options:
+  --name <n>     Project display name (default: directory name)
+  --repo <path>  Repository root (default: cwd)
+  --force        Overwrite existing config.yml / project.json
+
+doctor options:
+  --repo <path>  Repository root (default: cwd)
+  --ci           Treat as CI/headless (timeout_action default fail when unset)
+  --no-ci        Force interactive semantics (overrides CI/GITHUB_ACTIONS env)
+
 serve:
   lazyorch serve [--port n] [--host addr] [--home dir] [--background] [--once]
 
 start:
-  lazyorch start "<idea>" [-f idea.md] [--budget-usd n] [--yes]
-    [--tier t] [--model m] [--adapter a] [--repo path]
+  lazyorch start "<idea>" [-f idea.md] [--budget-usd n]
+    [--tier nano|small|medium|large|xlarge] [--model m] [--adapter a]
+    [--repo path]
+  Pins are stored as ModelPin under context key model_pin/run (for routeModel).
+  --yes is not implemented (rejected with usage).
 
 status:
-  lazyorch status [run_id] [--repo path] [--gate-exit]
+  lazyorch status [run_id] [--repo path] [--gate-exit|--check]
 
 run:
   lazyorch run list [--repo path]
-  lazyorch run show <run_id> [--repo path]
+  lazyorch run show <run_id> [--repo path] [--check|--gate-exit]
 
 gate:
   lazyorch gate list [--run id] [--all] [--check] [--repo path]
   lazyorch gate approve <gate_id> [--run id] [--decision action]
   lazyorch gate reject <gate_id> [--run id] [--decision action]
+  Multi-outcome gates require --decision:
+    plan_approve reject: cancel|revise
+    plan_dispute: accept_wontfix|force_addressed|abort
+    plan_max_rounds: force_approve|edit|abort
 
 models:
-  lazyorch models route [--role worker] [--task id] [--signals json]
-    [--tier t] [--model m] [--adapter a] [--budget-pressure]
+  lazyorch models route [--role worker] [--task id] [--run id]
+    [--signals json] [--tier t] [--model m] [--adapter a] [--budget-pressure]
+  --run loads context model_pin/run as run_pin; CLI flags override.
 
 logs:
   lazyorch logs [--run id] [--follow] [--limit n] [--repo path]
+  --limit 0 prints nothing. Reader never mutates event JSONL files.
 
-adapter / context / init / doctor: see prior help sections (unchanged).
+adapter usage:
+  lazyorch adapter list [--repo <path>] [--enabled] [--probe]
+  lazyorch adapter register --id <id> --binary <path> [--name <display>]
+    [--start-template <t>] [--models-args <csv|json>] [--capabilities <json>]
+    [--from-template aider|opencode] [--repo <path>]
+  lazyorch adapter test [id] [--repo <path>]
+
+  list is resolve-only by default (no version spawn). Pass --probe for live
+  version checks, or use adapter test. Unbound adapters warn (exit 0);
+  hard probe errors fail (exit 1). start_template recommended for custom ids.
+  --from-template seeds binary/start_template/models_args from USER_ADAPTER_TEMPLATES.
+  --models-args e.g. models or ["models"] enables listModels probes.
+
+context usage:
+  lazyorch context list --run <id> [--repo <path>]
+  lazyorch context get <key> --run <id> [--repo <path>]
+  lazyorch context set <key> <value> --run <id> [--repo <path>]
+  lazyorch context delete <key> --run <id> [--repo <path>]
 `;
 
 const CONTEXT_ACTIONS = new Set<string>(["list", "get", "set", "delete"]);
@@ -173,7 +222,7 @@ async function main(argv: string[]): Promise<number> {
         task: { type: "string" },
         signals: { type: "string" },
         "budget-pressure": { type: "boolean", default: false },
-        // gate
+        // gate / observational exit-3 opt-in
         all: { type: "boolean", default: false },
         check: { type: "boolean", default: false },
         decision: { type: "string" },
@@ -216,6 +265,10 @@ async function main(argv: string[]): Promise<number> {
     return EXIT.OK;
   }
 
+  // Unified opt-in for observational exit 3
+  const gateCheck =
+    values.check === true || values["gate-exit"] === true;
+
   switch (command) {
     case "init": {
       const initOpts: Parameters<typeof runInit>[0] = {
@@ -252,7 +305,6 @@ async function main(argv: string[]): Promise<number> {
       }
       if (typeof values.host === "string") serveOpts.host = values.host;
       if (typeof values.home === "string") serveOpts.home = values.home;
-      // Foreground without --once keeps process alive (daemon owns HTTP).
       const result = await runServe(serveOpts);
       return result.exitCode;
     }
@@ -260,7 +312,6 @@ async function main(argv: string[]): Promise<number> {
       const startOpts: Parameters<typeof runStart>[0] = {
         yes: values.yes === true,
       };
-      // idea: positional after command, or -f file
       if (typeof positionals[1] === "string") startOpts.idea = positionals[1];
       if (typeof values.f === "string") startOpts.ideaFile = values.f;
       if (typeof values.repo === "string") startOpts.repo = values.repo;
@@ -282,7 +333,7 @@ async function main(argv: string[]): Promise<number> {
       const statusOpts: Parameters<typeof runStatus>[0] = {};
       if (typeof positionals[1] === "string") statusOpts.runId = positionals[1];
       if (typeof values.repo === "string") statusOpts.repo = values.repo;
-      if (values["gate-exit"] === true) statusOpts.gateExit = true;
+      if (gateCheck) statusOpts.gateExit = true;
       const result = await runStatus(statusOpts);
       return result.exitCode;
     }
@@ -299,6 +350,7 @@ async function main(argv: string[]): Promise<number> {
         action: actionRaw as RunSubcommand,
       };
       if (typeof values.repo === "string") runOpts.repo = values.repo;
+      if (gateCheck) runOpts.check = true;
       if (actionRaw === "show") {
         if (typeof positionals[2] === "string") runOpts.runId = positionals[2];
         else if (typeof values.run === "string") runOpts.runId = values.run;
@@ -320,7 +372,7 @@ async function main(argv: string[]): Promise<number> {
       if (typeof values.repo === "string") gateOpts.repo = values.repo;
       if (typeof values.run === "string") gateOpts.run = values.run;
       if (values.all === true) gateOpts.all = true;
-      if (values.check === true) gateOpts.check = true;
+      if (gateCheck) gateOpts.check = true;
       if (typeof values.decision === "string") {
         gateOpts.decision = values.decision;
       }
@@ -348,6 +400,7 @@ async function main(argv: string[]): Promise<number> {
       if (typeof values.repo === "string") modelsOpts.repo = values.repo;
       if (typeof values.role === "string") modelsOpts.role = values.role;
       if (typeof values.task === "string") modelsOpts.task = values.task;
+      if (typeof values.run === "string") modelsOpts.run = values.run;
       if (typeof values.signals === "string") {
         modelsOpts.signalsJson = values.signals;
       }

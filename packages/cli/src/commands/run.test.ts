@@ -70,7 +70,7 @@ describe("runRunCommand", () => {
     expect(res.runs).toHaveLength(1);
   });
 
-  it("show returns gate exit when pending", async () => {
+  it("show is observational (exit 0) with pending gates", async () => {
     const repo = await tempRepo();
     const store = new StateStore(join(repo, ".lazyorch"));
     const runId = "run_show1aaaaaaaaaaaaaaaaaaaa";
@@ -101,8 +101,44 @@ describe("runRunCommand", () => {
       stdout: streams.stdout,
       stderr: streams.stderr,
     });
-    expect(res.exitCode).toBe(EXIT.GATE);
+    expect(res.exitCode).toBe(EXIT.OK);
     expect(res.gates).toHaveLength(1);
+  });
+
+  it("show --check exits 3 when pending", async () => {
+    const repo = await tempRepo();
+    const store = new StateStore(join(repo, ".lazyorch"));
+    const runId = "run_show2aaaaaaaaaaaaaaaaaaaa";
+    await store.writeRun({
+      schema_version: SCHEMA_VERSION,
+      id: runId,
+      project_id: "proj_run",
+      phase: "PlanConsensus",
+      idea: "show",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    await store.writeGates(runId, [
+      {
+        id: "gate_showbbbbbbbbbbbbbbbbbbbbb",
+        type: "human_intervention",
+        run_id: runId,
+        status: "pending",
+        created_at: "2026-01-01T00:00:00.000Z",
+        payload: {},
+      },
+    ]);
+
+    const streams = capture();
+    const res = await runRunCommand({
+      action: "show",
+      runId,
+      check: true,
+      repo,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.GATE);
   });
 
   it("usage when show missing id", async () => {
