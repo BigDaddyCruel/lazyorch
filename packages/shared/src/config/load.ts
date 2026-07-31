@@ -45,12 +45,32 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Resolve features.model_routing ↔ models.routing_enabled alias (KD).
  * If either is false → routing off.
+ *
+ * Does not invent objects for non-object values — invalid types are left
+ * for Zod to reject.
  */
 function applyRoutingAlias(
   raw: Record<string, unknown>,
 ): Record<string, unknown> {
-  const models = isPlainObject(raw.models) ? { ...raw.models } : {};
-  const features = isPlainObject(raw.features) ? { ...raw.features } : {};
+  const modelsPresent = "models" in raw;
+  const featuresPresent = "features" in raw;
+  const modelsIsObj = isPlainObject(raw.models);
+  const featuresIsObj = isPlainObject(raw.features);
+
+  // If either section is present but not a plain object, leave untouched.
+  if (
+    (modelsPresent && !modelsIsObj) ||
+    (featuresPresent && !featuresIsObj)
+  ) {
+    return raw;
+  }
+
+  const models: Record<string, unknown> = modelsIsObj
+    ? { ...(raw.models as Record<string, unknown>) }
+    : {};
+  const features: Record<string, unknown> = featuresIsObj
+    ? { ...(raw.features as Record<string, unknown>) }
+    : {};
 
   const modelsRouting =
     typeof models.routing_enabled === "boolean"
@@ -76,18 +96,51 @@ function applyRoutingAlias(
 
 /**
  * Apply CI/headless gate timeout default (KD-44) when not explicitly set.
+ * Leaves non-object `gates` untouched so Zod can reject it.
  */
 function applyCiTimeoutDefault(
   raw: Record<string, unknown>,
   ci: boolean,
 ): Record<string, unknown> {
   if (!ci) return raw;
+  if ("gates" in raw && !isPlainObject(raw.gates)) {
+    return raw;
+  }
   const gates = isPlainObject(raw.gates) ? { ...raw.gates } : {};
   if (gates.timeout_action === undefined) {
     gates.timeout_action = "fail";
     return { ...raw, gates };
   }
   return raw;
+}
+
+/**
+ * Solo mode (design / KD-25): 1 lead implements; 0 workers/reviewers/QA;
+ * force compensating gates (task_approve, plan_approve, merge).
+ */
+function applySoloMode(config: LazyorchConfig): LazyorchConfig {
+  if (config.team.mode !== "solo") return config;
+  return {
+    ...config,
+    team: {
+      ...config.team,
+      min_reviewers: 0,
+      max_reviewers: 0,
+      min_qa: 0,
+      max_qa: 0,
+    },
+    elasticity: {
+      ...config.elasticity,
+      min_workers: 0,
+      max_workers: 0,
+    },
+    gates: {
+      ...config.gates,
+      task_approve: true,
+      plan_approve: true,
+      merge: true,
+    },
+  };
 }
 
 function formatZodIssues(
@@ -142,7 +195,7 @@ export function parseConfig(
     );
   }
 
-  const config = parsed.data;
+  const config = applySoloMode(parsed.data);
   const packing = packingFromConfig(config);
   const warnings = [...packing.warnings];
 

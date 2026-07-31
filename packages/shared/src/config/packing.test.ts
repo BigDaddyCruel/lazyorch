@@ -48,12 +48,16 @@ describe("slot packing", () => {
       reserve_slots_lead: 1,
       min_reviewers: 1,
       min_qa: 1,
+      max_reviewers: 2,
+      max_qa: 2,
     });
     expect(result.ok).toBe(false);
     expect(result.minRequired).toBe(7);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toMatch(/slot packing/);
     expect(result.errors[0]).toMatch(/> max_concurrent_agents \(5\)/);
+    // Peak warn suppressed when min already fails (no redundant FAIL+WARN)
+    expect(result.warnings).toEqual([]);
   });
 
   it("warns when peak packing exceeds ceiling but min fits", () => {

@@ -8,6 +8,11 @@ export function sharedPlaceholder(): string {
 }
 
 export {
+  SCHEMA_VERSION,
+  type SchemaVersion,
+} from "./schema-version.js";
+
+export {
   generateId,
   ID_PREFIXES,
   isPrefixedId,

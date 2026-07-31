@@ -178,4 +178,55 @@ gates:
     expect(config.gates.plan_approve).toBe(false);
     expect(config.scheduling.max_concurrent_agents).toBe(8);
   });
+
+  it("rejects non-object section values (no silent coercion)", () => {
+    expect(() => parseConfig({ models: "nope" })).toThrow(ConfigValidationError);
+    expect(() => parseConfig({ features: false })).toThrow(ConfigValidationError);
+    expect(() =>
+      parseConfig({ gates: "x" }, { ci: true }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it("applies solo mode compensating gates and zero min team", () => {
+    const { config, packing } = parseConfig({
+      team: { mode: "solo" },
+    });
+    expect(config.team.mode).toBe("solo");
+    expect(config.team.min_reviewers).toBe(0);
+    expect(config.team.max_reviewers).toBe(0);
+    expect(config.team.min_qa).toBe(0);
+    expect(config.team.max_qa).toBe(0);
+    expect(config.elasticity.max_workers).toBe(0);
+    expect(config.elasticity.min_workers).toBe(0);
+    expect(config.gates.task_approve).toBe(true);
+    expect(config.gates.plan_approve).toBe(true);
+    expect(config.gates.merge).toBe(true);
+    expect(packing.ok).toBe(true);
+    expect(packing.minRequired).toBe(1); // lead reserve only
+  });
+
+  it("rejects unknown top-level and section keys (strict)", () => {
+    expect(() => parseConfig({ not_a_section: true })).toThrow(
+      ConfigValidationError,
+    );
+    expect(() =>
+      parseConfig({ elasticity: { max_worker: 4 } }),
+    ).toThrow(ConfigValidationError);
+    expect(() =>
+      parseConfig({ scheduling: { max_concurrent_agent: 8 } }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it("rejects duplicate adapters.registry ids", () => {
+    expect(() =>
+      parseConfig({
+        adapters: {
+          registry: [
+            { id: "aider", binary: "aider" },
+            { id: "aider", binary: "aider2" },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate adapters\.registry id/);
+  });
 });

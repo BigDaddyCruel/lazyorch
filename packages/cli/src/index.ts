@@ -37,7 +37,8 @@ init options:
 
 doctor options:
   --repo <path>  Repository root (default: cwd)
-  --ci           Treat as CI/headless (timeout_action default fail)
+  --ci           Treat as CI/headless (timeout_action default fail when unset)
+  --no-ci        Force interactive semantics (overrides CI/GITHUB_ACTIONS env)
 `;
 
 async function main(argv: string[]): Promise<number> {
@@ -52,6 +53,7 @@ async function main(argv: string[]): Promise<number> {
         repo: { type: "string" },
         force: { type: "boolean", default: false },
         ci: { type: "boolean", default: false },
+        "no-ci": { type: "boolean", default: false },
         help: { type: "boolean", default: false, short: "h" },
         version: { type: "boolean", default: false, short: "v" },
       },
@@ -95,7 +97,12 @@ async function main(argv: string[]): Promise<number> {
     case "doctor": {
       const doctorOpts: Parameters<typeof runDoctor>[0] = {};
       if (typeof values.repo === "string") doctorOpts.repo = values.repo;
-      if (values.ci === true) doctorOpts.ci = true;
+      // --no-ci wins over --ci and env auto-detect
+      if (values["no-ci"] === true) {
+        doctorOpts.ci = false;
+      } else if (values.ci === true) {
+        doctorOpts.ci = true;
+      }
       const result = await runDoctor(doctorOpts);
       return result.exitCode;
     }

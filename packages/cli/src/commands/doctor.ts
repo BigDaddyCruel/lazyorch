@@ -9,10 +9,13 @@ import {
 export interface DoctorOptions {
   /** Project root (defaults to cwd). */
   repo?: string;
-  /** Treat as CI/headless for timeout_action defaults. */
+  /**
+   * Treat as CI/headless for timeout_action defaults.
+   * When omitted, auto-detects from CI/GITHUB_ACTIONS env.
+   * Pass `false` (`--no-ci`) to force interactive semantics even under CI env.
+   */
   ci?: boolean;
   stdout?: NodeJS.WritableStream;
-  stderr?: NodeJS.WritableStream;
 }
 
 export type DoctorLevel = "ok" | "warn" | "error";
@@ -132,19 +135,43 @@ export async function runDoctor(
   } else {
     try {
       const raw = await readFile(projectPath, "utf8");
-      const proj = JSON.parse(raw) as { schema_version?: unknown; id?: unknown };
+      const proj = JSON.parse(raw) as {
+        schema_version?: unknown;
+        id?: unknown;
+        repo_root?: unknown;
+        name?: unknown;
+      };
+      const issues: string[] = [];
       if (typeof proj.schema_version !== "number") {
+        issues.push("missing or non-number schema_version");
+      }
+      if (typeof proj.id !== "string" || proj.id.length === 0) {
+        issues.push("missing or empty id");
+      }
+      if (typeof proj.repo_root !== "string" || proj.repo_root.length === 0) {
+        issues.push("missing or empty repo_root");
+      }
+      if (issues.length > 0) {
         findings.push({
-          level: "warn",
-          code: "project_schema",
-          message: "project.json missing schema_version",
+          level: "error",
+          code: "project_json_invalid",
+          message: `project.json incomplete: ${issues.join("; ")}`,
         });
       } else {
         findings.push({
           level: "ok",
           code: "project_json",
-          message: `project.json ok (schema_version=${proj.schema_version})`,
+          message: `project.json ok (schema_version=${String(proj.schema_version)}, id=${String(proj.id)})`,
         });
+        // Soft warn if repo_root does not match doctor --repo root
+        const recorded = resolve(String(proj.repo_root));
+        if (recorded !== root) {
+          findings.push({
+            level: "warn",
+            code: "project_repo_root_mismatch",
+            message: `project.json repo_root (${recorded}) ≠ doctor root (${root})`,
+          });
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

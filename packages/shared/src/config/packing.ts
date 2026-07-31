@@ -67,7 +67,11 @@ export function validateSlotPacking(input: SlotPackingInput): SlotPackingResult 
     );
   }
 
-  if (peakRequired > input.max_concurrent_agents) {
+  // Peak warn only when min-team packing is ok (avoid redundant FAIL+WARN).
+  if (
+    errors.length === 0 &&
+    peakRequired > input.max_concurrent_agents
+  ) {
     const maxReviewers = input.max_reviewers ?? input.min_reviewers;
     const maxQa = input.max_qa ?? input.min_qa;
     warnings.push(

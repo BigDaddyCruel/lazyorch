@@ -1,13 +1,11 @@
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
+  SCHEMA_VERSION,
   createDefaultConfig,
   stringifyConfigYaml,
 } from "@lazyorch/shared";
-
-/** Project entity schema version (mirrors @lazyorch/core SCHEMA_VERSION). */
-const PROJECT_SCHEMA_VERSION = 1 as const;
 
 export interface InitOptions {
   /** Target repository root (defaults to cwd). */
@@ -39,8 +37,18 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-function projectId(): string {
+function newProjectId(): string {
   return `proj_${randomBytes(12).toString("hex")}`;
+}
+
+async function readExistingProjectId(projectPath: string): Promise<string | null> {
+  try {
+    const raw = await readFile(projectPath, "utf8");
+    const proj = JSON.parse(raw) as { id?: unknown };
+    return typeof proj.id === "string" && proj.id.length > 0 ? proj.id : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -73,16 +81,17 @@ export async function runInit(options: InitOptions = {}): Promise<InitResult> {
     stdout.write(`wrote ${configPath}\n`);
   }
 
-  // project.json
-  let id = projectId();
+  // project.json — only generate an id when writing; on skip reuse disk id
+  let id: string;
   if ((await exists(projectPath)) && !force) {
     skipped.push(projectPath);
     stdout.write(`skip  ${projectPath} (exists; use --force to overwrite)\n`);
+    id = (await readExistingProjectId(projectPath)) ?? newProjectId();
   } else {
     const now = new Date().toISOString();
-    id = projectId();
+    id = newProjectId();
     const project = {
-      schema_version: PROJECT_SCHEMA_VERSION,
+      schema_version: SCHEMA_VERSION,
       id,
       repo_root: root,
       name,

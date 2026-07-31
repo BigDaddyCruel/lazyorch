@@ -1,4 +1,5 @@
-/** Forward-only project/entity schema version (project.json / entity JSON). */
-export const SCHEMA_VERSION = 1 as const;
-
-export type SchemaVersion = typeof SCHEMA_VERSION;
+/** Re-export canonical schema version from shared (single source of truth). */
+export {
+  SCHEMA_VERSION,
+  type SchemaVersion,
+} from "@lazyorch/shared";
