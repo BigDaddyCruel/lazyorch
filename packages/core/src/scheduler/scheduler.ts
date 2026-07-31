@@ -426,6 +426,10 @@ function buildAssignOptions(
     opts.skip_scope_lock_task_ids = input.skip_scope_lock_task_ids;
   }
   if (input.max_assign !== undefined) opts.max_assign = input.max_assign;
+  // PR-13: role-template matching uses team.worker_templates
+  if (input.config.team.worker_templates?.length) {
+    opts.worker_templates = input.config.team.worker_templates;
+  }
 
   opts.nextAgentId = () => {
     agentSeq.value += 1;

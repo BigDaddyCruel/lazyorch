@@ -5,16 +5,14 @@
  * 1. Prefer binding an idle pool worker (reuse); mint only when needed
  * 2. Path-scope locks (forge port; sorted atomic acquire)
  * 3. Worktree hooks (interface; no real git in unit tests)
- * 4. Model router at session start (KD-42)
- * 5. Task FSM transition with assignee / worktree / branch
+ * 4. Role-template matching (role_affinity ∩ worker_templates) + preferred_adapters
+ * 5. Model router at session start (KD-42)
+ * 6. Task FSM transition with assignee / worktree / branch
  *
  * Caps (per assignment + caller max_assign):
  * - free_for_workers (slot ceiling + lead reserve)
  * - pool_workers ≤ max_workers when minting (idle reuse free)
  * - desired / budget via max_assign from schedulerTick
- *
- * Role-template matching (role_affinity ∩ worker_templates) is deferred
- * to PR-13 team manager.
  */
 
 import { generateId } from "@lazyorch/shared";
@@ -27,6 +25,12 @@ import {
   type RouteResult,
 } from "../models/index.js";
 import { transitionTaskStatus } from "../orchestrator/task-fsm.js";
+import {
+  FALLBACK_WORKER_TEMPLATE,
+  matchWorkerTemplate,
+  type MatchWorkerTemplateResult,
+  type RoleTemplate,
+} from "../team/index.js";
 import type { RunPhase } from "../types/run.js";
 import type { Task } from "../types/task.js";
 import {
@@ -72,6 +76,13 @@ export interface AssignReadyOptions {
   routing?: AssignRoutingOptions;
   metrics?: SchedulerMetrics;
   skip_scope_lock_task_ids?: ReadonlySet<string>;
+  /**
+   * team.worker_templates for role-template matching (PR-13).
+   * Default: fullstack-dev, backend-dev, frontend-dev.
+   */
+  worker_templates?: readonly string[];
+  /** Optional extra / override role templates for matching. */
+  role_templates?: readonly RoleTemplate[];
 }
 
 export interface AssignRoutingOptions {
@@ -85,6 +96,12 @@ export interface AssignRoutingOptions {
   budget_pressure?: boolean;
   routeFn?: (input: RouteInput) => RouteResult;
 }
+
+const DEFAULT_WORKER_TEMPLATES = [
+  FALLBACK_WORKER_TEMPLATE,
+  "backend-dev",
+  "frontend-dev",
+] as const;
 
 function taskPin(task: Task): ModelPin | undefined {
   const pin: ModelPin = {};
@@ -108,6 +125,7 @@ function buildRouteInput(
   task: Task,
   lengths: ReadonlyMap<string, number>,
   routing: AssignRoutingOptions | undefined,
+  preferredFromTemplate?: readonly string[],
 ): RouteInput {
   const pin = taskPin(task);
   const input: RouteInput = {
@@ -137,8 +155,14 @@ function buildRouteInput(
   if (routing?.preference_order) {
     input.preference_order = routing.preference_order;
   }
-  if (routing?.preferred_adapters) {
-    input.preferred_adapters = routing.preferred_adapters;
+  // Explicit routing preferred_adapters win; else template preferred_adapters.
+  const preferred =
+    routing?.preferred_adapters ??
+    (preferredFromTemplate && preferredFromTemplate.length > 0
+      ? [...preferredFromTemplate]
+      : undefined);
+  if (preferred) {
+    input.preferred_adapters = preferred;
   }
   if (routing?.budget_pressure !== undefined) {
     input.budget_pressure = routing.budget_pressure;
@@ -153,10 +177,29 @@ function routeForTask(
   task: Task,
   lengths: ReadonlyMap<string, number>,
   routing: AssignRoutingOptions | undefined,
+  preferredFromTemplate?: readonly string[],
 ): RouteResult {
-  const input = buildRouteInput(task, lengths, routing);
+  const input = buildRouteInput(
+    task,
+    lengths,
+    routing,
+    preferredFromTemplate,
+  );
   if (routing?.routeFn) return routing.routeFn(input);
   return routeModel(input);
+}
+
+/** Match worker template for task (PR-13 role-template matching). */
+export function matchTemplateForTask(
+  task: Task,
+  workerTemplates?: readonly string[],
+  roleTemplates?: readonly RoleTemplate[],
+): MatchWorkerTemplateResult {
+  return matchWorkerTemplate(
+    task.role_affinity,
+    workerTemplates ?? DEFAULT_WORKER_TEMPLATES,
+    roleTemplates,
+  );
 }
 
 /** First idle, non-draining worker with no task (oldest last_activity first). */
@@ -408,9 +451,20 @@ async function assignLoop(
     let agentId: string;
     let runHandle: string;
     let reused = false;
+    let templateMatch: MatchWorkerTemplateResult;
 
     try {
-      route = routeForTask(task, lengths, options.routing);
+      templateMatch = matchTemplateForTask(
+        task,
+        options.worker_templates,
+        options.role_templates,
+      );
+      route = routeForTask(
+        task,
+        lengths,
+        options.routing,
+        templateMatch.template.preferred_adapters,
+      );
       const idleNow = pickIdleWorker(liveSessions);
       if (idleNow) {
         agentId = idleNow.agent_id;
@@ -472,6 +526,7 @@ async function assignLoop(
       session_kind: route.session_kind,
       run_handle: runHandle,
       reused_idle: reused,
+      worker_template_id: templateMatch.template_id,
     };
     if (route.effort !== undefined) session_plan.effort = route.effort;
     if (route.score !== undefined) {
@@ -693,9 +748,20 @@ function assignReadyTasksBlocking(
     let agentId: string;
     let runHandle: string;
     let reused = false;
+    let templateMatch: MatchWorkerTemplateResult;
 
     try {
-      route = routeForTask(task, lengths, options.routing);
+      templateMatch = matchTemplateForTask(
+        task,
+        options.worker_templates,
+        options.role_templates,
+      );
+      route = routeForTask(
+        task,
+        lengths,
+        options.routing,
+        templateMatch.template.preferred_adapters,
+      );
       const idleNow = pickIdleWorker(liveSessions);
       if (idleNow) {
         agentId = idleNow.agent_id;
@@ -756,6 +822,7 @@ function assignReadyTasksBlocking(
       session_kind: route.session_kind,
       run_handle: runHandle,
       reused_idle: reused,
+      worker_template_id: templateMatch.template_id,
     };
     if (route.effort !== undefined) session_plan.effort = route.effort;
     if (route.score !== undefined) {

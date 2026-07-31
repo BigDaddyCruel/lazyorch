@@ -201,6 +201,8 @@ export interface AssignTaskResult {
     reused_idle: boolean;
     effort?: RouteResult["effort"];
     complexity_score?: number;
+    /** Matched worker role template id (PR-13). */
+    worker_template_id?: string;
   };
 }
 

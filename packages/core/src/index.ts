@@ -5,6 +5,7 @@
  * PR-05: planning engine (validators, consensus, fake ports, replan hooks).
  * PR-10: model complexity router (estimator KD-41, router KD-42).
  * PR-12: scheduler, slots, elastic workers (+ router at assign).
+ * PR-13: team manager, skills, preferred_adapters, role-template matching.
  * PR-14: shared run context KV (context.json + write ACL).
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
@@ -253,6 +254,7 @@ export {
   releaseTaskScopeLocks,
   pickIdleWorker,
   maxAssignTowardDesired,
+  matchTemplateForTask,
   // metrics + tick
   SchedulerMetrics,
   planElasticity,
@@ -294,3 +296,75 @@ export {
   type SchedulerConfig,
   type SchedulerRuntimeState,
 } from "./scheduler/index.js";
+
+export {
+  // role templates + preferred_adapters
+  DEFAULT_CODING_PREFERRED_ADAPTERS,
+  DEFAULT_QA_PREFERRED_ADAPTERS,
+  DEFAULT_PREFERRED_ADAPTERS_BY_ROLE,
+  FALLBACK_WORKER_TEMPLATE,
+  DEFAULT_ROLE_TEMPLATES,
+  getRoleTemplate,
+  listRoleTemplateIds,
+  preferredAdaptersForRole,
+  resolveRoleTemplate,
+  skillsForRoleDefault,
+  defaultTemplateIdForRole,
+  // mode (full | solo)
+  resolveTeamMode,
+  soloForcesTaskApprove,
+  mayCollapsePlanWriterAndReviewer,
+  // matching
+  templateTagSet,
+  affinityIntersection,
+  matchWorkerTemplate,
+  matchWorkerTemplateForReadyTasks,
+  // ephemeral review/QA
+  DEFAULT_REVIEWER_IDLE_EXIT_MS,
+  DEFAULT_REVIEWER_MAX_RESTARTS_PER_HOUR,
+  DEFAULT_QA_MAX_RESTARTS_PER_HOUR,
+  DEFAULT_LEAD_MAX_RESTARTS_PER_HOUR,
+  DEFAULT_LEAD_IDLE_EXIT_MS,
+  DEFAULT_QA_IDLE_EXIT_MS,
+  defaultEphemeralPolicy,
+  shouldIdleExitEphemeral,
+  reviewQueueTasks,
+  canStartReviewerSession,
+  canStartQaSession,
+  withinRestartBudget,
+  // team manager
+  buildTeam,
+  mintWorkerAgent,
+  findAgent,
+  agentsByRole,
+  preferredAdaptersForAgent,
+  type SessionKindPreference,
+  type ApprovalPolicy,
+  type RoleTemplate,
+  type EphemeralSessionPolicy,
+  type EffectiveTeamLimits,
+  type BuildTeamInput,
+  type BuiltTeam,
+  type ResolveTeamModeInput,
+  type MatchWorkerTemplateResult,
+  type IdleExitInput,
+  type CanStartReviewerInput,
+  type CanStartQaInput,
+} from "./team/index.js";
+
+export {
+  BUILTIN_SKILL_IDS,
+  DEFAULT_ROLE_SKILLS,
+  SKILL_STUBS,
+  isBuiltinSkillId,
+  listSkills,
+  skillsForRole,
+  loadSkill,
+  loadSkillAsync,
+  loadSkillsMarkdown,
+  skillsDir,
+  createSkillLoader,
+  emptySkillLoader,
+  type BuiltinSkillId,
+  type SkillLoader,
+} from "./skills/index.js";

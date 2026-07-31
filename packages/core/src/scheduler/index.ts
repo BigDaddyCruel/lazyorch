@@ -36,6 +36,7 @@ export {
   releaseTaskScopeLocks,
   pickIdleWorker,
   maxAssignTowardDesired,
+  matchTemplateForTask,
   type AssignReadyOptions,
   type AssignRoutingOptions,
 } from "./assign.js";

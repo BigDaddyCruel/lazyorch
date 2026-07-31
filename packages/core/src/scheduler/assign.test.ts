@@ -207,6 +207,61 @@ describe("assignReadyTasks", () => {
     expect(result.skipped[0]?.reason).toBe("max_workers");
   });
 
+  it("matches worker template from role_affinity and stamps session_plan", () => {
+    const locks = new FakeScopeLockManager();
+    let seenPreferred: string[] | undefined;
+    const result = assignReadyTasks({
+      tasks: [
+        task("tsk_be", {
+          role_affinity: ["backend"],
+          scope: ["src/api/**"],
+        }),
+      ],
+      sessions: [],
+      phase: "Implementing",
+      limits,
+      locks,
+      worktrees: new FakeWorktreePort(),
+      now_ms: 1,
+      worker_templates: ["fullstack-dev", "backend-dev", "frontend-dev"],
+      routing: {
+        routeFn: (input) => {
+          seenPreferred = input.preferred_adapters;
+          return fixedRoute;
+        },
+      },
+      nextAgentId: () => "agt_be",
+    });
+    expect(result.assigned).toHaveLength(1);
+    expect(result.assigned[0]!.session_plan.worker_template_id).toBe(
+      "backend-dev",
+    );
+    expect(seenPreferred?.[0]).toBe("claude");
+  });
+
+  it("falls back to fullstack-dev when role_affinity matches nothing", () => {
+    const locks = new FakeScopeLockManager();
+    const result = assignReadyTasks({
+      tasks: [
+        task("tsk_x", {
+          role_affinity: ["obscure-platform"],
+          scope: ["src/x/**"],
+        }),
+      ],
+      sessions: [],
+      phase: "Implementing",
+      limits,
+      locks,
+      now_ms: 1,
+      worker_templates: ["fullstack-dev", "backend-dev", "frontend-dev"],
+      routing: { routeFn: () => fixedRoute },
+      nextAgentId: () => "agt_x",
+    });
+    expect(result.assigned[0]!.session_plan.worker_template_id).toBe(
+      "fullstack-dev",
+    );
+  });
+
   it("assigns multiple non-overlapping tasks up to free slots", () => {
     const locks = new FakeScopeLockManager();
     const worktrees = new FakeWorktreePort();
