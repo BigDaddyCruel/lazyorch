@@ -11,6 +11,15 @@ importers:
       '@eslint/js':
         specifier: ^9.18.0
         version: 9.39.5
+      '@lazyorch/adapters':
+        specifier: workspace:*
+        version: link:packages/adapters
+      '@lazyorch/core':
+        specifier: workspace:*
+        version: link:packages/core
+      '@lazyorch/shared':
+        specifier: workspace:*
+        version: link:packages/shared
       '@types/node':
         specifier: ^22.10.5
         version: 22.20.1

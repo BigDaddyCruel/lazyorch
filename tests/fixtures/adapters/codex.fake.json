@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "adapter_id": "codex",
+  "mode": "fake",
+  "description": "Record/replay sample for OpenAI Codex CLI (fake mode; no live LLM).",
+  "session": {
+    "model": "o4-mini",
+    "model_tier": "medium",
+    "role": "worker",
+    "session_kind": "llm"
+  },
+  "recorded_start": {
+    "adapter_id": "codex",
+    "run_handle": "{run_handle}",
+    "argv": [
+      "/bin/codex",
+      "exec",
+      "--model",
+      "o4-mini",
+      "{prompt_file}"
+    ],
+    "cwd": "{cwd}",
+    "model": "o4-mini",
+    "prompt_file": "{prompt_file}",
+    "session_dir": "{session_dir}",
+    "started_at": "2026-01-01T00:00:00.000Z",
+    "mode": "fake"
+  },
+  "session_result": {
+    "status": "ok",
+    "exit_code": 0,
+    "adapter_id": "codex",
+    "model_used": "o4-mini",
+    "summary": "fake codex completed",
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 20
+    }
+  }
+}

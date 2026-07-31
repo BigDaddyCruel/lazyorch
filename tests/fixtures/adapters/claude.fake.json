@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "adapter_id": "claude",
+  "mode": "fake",
+  "description": "Record/replay sample for Claude Code (fake mode; no live LLM).",
+  "session": {
+    "model": "claude-sonnet-4-6",
+    "model_tier": "large",
+    "role": "worker",
+    "session_kind": "llm"
+  },
+  "recorded_start": {
+    "adapter_id": "claude",
+    "run_handle": "{run_handle}",
+    "argv": [
+      "/bin/claude",
+      "--model",
+      "claude-sonnet-4-6",
+      "--print",
+      "--permission-mode",
+      "bypassPermissions",
+      "{prompt_file}"
+    ],
+    "cwd": "{cwd}",
+    "model": "claude-sonnet-4-6",
+    "prompt_file": "{prompt_file}",
+    "session_dir": "{session_dir}",
+    "started_at": "2026-01-01T00:00:00.000Z",
+    "mode": "fake"
+  },
+  "session_result": {
+    "status": "ok",
+    "exit_code": 0,
+    "adapter_id": "claude",
+    "model_used": "claude-sonnet-4-6",
+    "summary": "fake claude completed",
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 20
+    }
+  }
+}

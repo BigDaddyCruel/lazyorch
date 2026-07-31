@@ -4,11 +4,17 @@ AI agent orchestration daemon with multi-backend adapters, CLI, and desktop GUI.
 
 LazyOrch coordinates long-running agent work across backends (Claude, Codex, Agy, Grok, shell, and generic), with planning, scheduling, git/GitHub integration, and a local daemon API.
 
-> **Status:** Early scaffold. Packages are stubs; domain logic lands in follow-up PRs.
+> **Status:** Active development. Core orchestration, adapters, CLI, forge MVP, and GUI MVP are in tree.
+
+## User guide
+
+Operator docs (init, doctor, start, gates, adapters, custom CLIs, Windows Defender/path notes):
+
+- **[`docs/user-guide.md`](docs/user-guide.md)**
 
 ## Design
 
-See the full design document:
+Full design document and key decisions:
 
 - [`docs/design-lazyorch.md`](docs/design-lazyorch.md)
 
@@ -27,8 +33,10 @@ lazyorch/
     shared/      # logging, ids, config schemas
   apps/
     gui/         # Tauri 2 + React/Vite web UI MVP
-  docs/
+  docs/          # design + user-guide.md + openapi
   tests/
+    fixtures/    # adapter record/replay samples (fake mode)
+    e2e/         # planning freeze + implement smoke (no live LLM)
 ```
 
 ## Requirements
@@ -62,8 +70,12 @@ Workflow:
 3. Per-package `build` / `typecheck` scripts also use `tsc -b` so filtered builds rebuild
    dependencies when needed.
 
-Unit tests run from the **repo root** (`pnpm test` / Vitest config includes). There are no
-per-package `test` scripts.
+Unit and E2E tests run from the **repo root** (`pnpm test` / Vitest config includes
+`packages/**` and `tests/**`). There are no per-package `test` scripts.
+
+Adapter **fake-mode** fixtures (record/replay without LLM keys) live under
+[`tests/fixtures/adapters/`](tests/fixtures/adapters/). Planning freeze + implement
+smoke is in [`tests/e2e/`](tests/e2e/). See the [user guide](docs/user-guide.md#fake--record-modes-ci-without-live-llms).
 
 ## Scripts
 
@@ -72,8 +84,8 @@ per-package `test` scripts.
 | `pnpm lint`         | ESLint across the monorepo                       |
 | `pnpm format`       | Prettier write                                   |
 | `pnpm format:check` | Prettier check                                   |
-| `pnpm typecheck`    | `tsc -b` (project references, emits `dist`)      |
-| `pnpm test`         | Vitest from repo root                            |
+| `pnpm typecheck`    | `tsc -b` packages + tests + GUI typecheck        |
+| `pnpm test`         | Vitest (packages + e2e) + GUI unit tests         |
 | `pnpm build`        | `tsc -b` packages + GUI Vite build               |
 | `pnpm clean`        | `tsc -b --clean`                                 |
 | `pnpm gui:dev`      | Vite dev server for `@lazyorch/gui` (:1420)      |

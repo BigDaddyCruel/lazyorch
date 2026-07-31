@@ -15,7 +15,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc -b --pretty false && pnpm --filter @lazyorch/gui typecheck",
+    "typecheck": "tsc -b --pretty false && tsc -p tests --pretty false && pnpm --filter @lazyorch/gui typecheck",
     "test": "vitest run && pnpm --filter @lazyorch/gui test",
     "test:watch": "vitest",
     "gui:dev": "pnpm --filter @lazyorch/gui dev",
@@ -23,6 +23,9 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
+    "@lazyorch/adapters": "workspace:*",
+    "@lazyorch/core": "workspace:*",
+    "@lazyorch/shared": "workspace:*",
     "@types/node": "^22.10.5",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",

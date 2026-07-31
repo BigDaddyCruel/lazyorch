@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "adapter_id": "grok",
+  "mode": "fake",
+  "description": "Record/replay sample for Grok CLI (fake mode; no live LLM).",
+  "session": {
+    "model": "grok-3",
+    "model_tier": "large",
+    "role": "worker",
+    "session_kind": "llm"
+  },
+  "recorded_start": {
+    "adapter_id": "grok",
+    "run_handle": "{run_handle}",
+    "argv": [
+      "/bin/grok",
+      "--model",
+      "grok-3",
+      "{prompt_file}"
+    ],
+    "cwd": "{cwd}",
+    "model": "grok-3",
+    "prompt_file": "{prompt_file}",
+    "session_dir": "{session_dir}",
+    "started_at": "2026-01-01T00:00:00.000Z",
+    "mode": "fake"
+  },
+  "session_result": {
+    "status": "ok",
+    "exit_code": 0,
+    "adapter_id": "grok",
+    "model_used": "grok-3",
+    "summary": "fake grok completed",
+    "usage": {
+      "input_tokens": 10,
+      "output_tokens": 20
+    }
+  }
+}
