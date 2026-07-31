@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * @lazyorch/cli — lazyorch command-line interface.
  * Placeholder package; domain logic lands in later PRs.

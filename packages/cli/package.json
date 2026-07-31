@@ -19,9 +19,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
     "@lazyorch/shared": "workspace:*"

@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * @lazyorch/daemon — HTTP/WS server, process entry.
  * Placeholder package; domain logic lands in later PRs.
