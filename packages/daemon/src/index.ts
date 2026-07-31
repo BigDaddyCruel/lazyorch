@@ -3,7 +3,12 @@
  * @lazyorch/daemon — user-level HTTP/SSE server, lockfile lifecycle, multi-project registry.
  */
 import { parseArgs } from "node:util";
+import { spawn } from "node:child_process";
+import { openSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { startDaemon, stopDaemon } from "./serve.js";
+import { daemonLogPath, userLazyorchDir } from "./paths.js";
+import { inspectDaemonLock, readDaemonToken } from "./lockfile.js";
 
 export const PACKAGE_NAME = "@lazyorch/daemon" as const;
 
@@ -24,6 +29,7 @@ export {
   projectsRegistryPath,
   projectEventsDir,
   eventJsonlPath,
+  sanitizeEventFileId,
 } from "./paths.js";
 
 // --- lockfile ---
@@ -37,6 +43,10 @@ export {
   removeDaemonLock,
   lockFileExists,
   buildLock,
+  acquireDaemonLockExclusive,
+  tryCreateDaemonLockExclusive,
+  assertApiMajor,
+  ApiMajorMismatchError,
   type DaemonLock,
   type ReadLockResult,
 } from "./lockfile.js";
@@ -45,6 +55,7 @@ export {
 export {
   ProjectRegistry,
   normalizeRepoRoot,
+  RegistryConflictError,
   type RegisteredProject,
   type ProjectRegistryFile,
 } from "./project-registry.js";
@@ -64,6 +75,9 @@ export {
 // --- HTTP ---
 export {
   createDaemonHttpServer,
+  tokensEqual,
+  readBody,
+  MAX_BODY_BYTES,
   type DaemonHttpContext,
   type DaemonHttpServer,
   type StubRun,
@@ -75,6 +89,7 @@ export {
   stopDaemon,
   isPortFree,
   pickPort,
+  appendDaemonLog,
   type ServeOptions,
   type ServeResult,
 } from "./serve.js";
@@ -100,7 +115,7 @@ Options:
   --port <n>       Preferred port (default 7420; scans 7420-7430)
   --host <addr>    Bind address (default 127.0.0.1)
   --home <dir>     Override user state root (or LAZYORCH_HOME)
-  --background     Detach after start (lockfile written; process stays up)
+  --background     Re-spawn detached (stdio → daemon.log) and exit parent
   --require-auth   Require Bearer token even on loopback
   -h, --help       Show help
 `;
@@ -150,8 +165,8 @@ async function main(argv: string[]): Promise<number> {
 
   const port =
     typeof values.port === "string" ? Number(values.port) : undefined;
-  if (port !== undefined && (!Number.isInteger(port) || port <= 0)) {
-    process.stderr.write("error: --port must be a positive integer\n");
+  if (port !== undefined && (!Number.isInteger(port) || port < 0)) {
+    process.stderr.write("error: --port must be a non-negative integer\n");
     return 2;
   }
 
@@ -159,6 +174,14 @@ async function main(argv: string[]): Promise<number> {
     typeof values.home === "string"
       ? values.home
       : process.env.LAZYORCH_HOME;
+
+  // --background: parent re-spawns detached child, waits for health, exits
+  if (
+    values.background === true &&
+    process.env.LAZYORCH_DAEMON_CHILD !== "1"
+  ) {
+    return spawnBackgroundParent(argv, homeDir);
+  }
 
   const serveOpts: Parameters<typeof startDaemon>[0] = {
     requireAuth: values["require-auth"] === true,
@@ -205,6 +228,82 @@ async function main(argv: string[]): Promise<number> {
     /* never resolves; signals handle exit */
   });
   return 0;
+}
+
+/**
+ * Parent process for `serve --background`: detach a child with logs, wait for
+ * /health, print URL, exit 0.
+ */
+async function spawnBackgroundParent(
+  argv: string[],
+  homeDir: string | undefined,
+): Promise<number> {
+  const entry = process.argv[1];
+  if (!entry) {
+    process.stderr.write("error: cannot resolve daemon entry for --background\n");
+    return 1;
+  }
+
+  // Strip --background from child argv; mark child via env
+  const childArgs = argv.filter((a) => a !== "--background");
+  // Ensure `serve` is present
+  if (!childArgs.includes("serve")) {
+    childArgs.unshift("serve");
+  }
+
+  const stateDir = userLazyorchDir(homeDir);
+  mkdirSync(stateDir, { recursive: true });
+  const logPath = daemonLogPath(homeDir);
+  let logFd: number;
+  try {
+    logFd = openSync(logPath, "a");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`error: cannot open daemon.log: ${msg}\n`);
+    return 1;
+  }
+
+  const child = spawn(process.execPath, [entry, ...childArgs], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: {
+      ...process.env,
+      LAZYORCH_DAEMON_CHILD: "1",
+      ...(homeDir ? { LAZYORCH_HOME: homeDir } : {}),
+    },
+  });
+  child.unref();
+
+  const timeoutMs = 10_000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    const inspected = await inspectDaemonLock(homeDir);
+    if (inspected.healthy && inspected.lock && inspected.lock.port > 0) {
+      const url = `http://${inspected.lock.host}:${inspected.lock.port}`;
+      try {
+        const res = await fetch(`${url}/health`);
+        if (res.ok) {
+          const token = (await readDaemonToken(homeDir)) ?? "";
+          process.stdout.write(
+            `daemon started in background at ${url} (pid ${inspected.lock.pid})\n`,
+          );
+          if (token) {
+            process.stdout.write(`token file: ${inspected.lock.token_path}\n`);
+          }
+          process.stdout.write(`log: ${logPath}\n`);
+          return 0;
+        }
+      } catch {
+        /* retry */
+      }
+    }
+  }
+
+  process.stderr.write(
+    `error: timed out waiting for background daemon (${timeoutMs}ms); see ${logPath}\n`,
+  );
+  return 1;
 }
 
 const isDirectRun =

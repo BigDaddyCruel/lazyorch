@@ -67,6 +67,10 @@ paths:
       responses:
         "200":
           description: Project registered
+        "409":
+          description: Registry conflict (id/root cross-match)
+        "413":
+          description: Request body too large (max 64 KiB)
   /v1/runs:
     get:
       summary: List runs (stub; empty until orchestrator wired)
@@ -104,12 +108,22 @@ paths:
           description: Routing decision stub
   /v1/events:
     get:
-      summary: Server-Sent Events stream (ephemeral)
+      summary: Server-Sent Events stream (ephemeral live fan-out)
+      description: |
+        Live event stream only for PR-06. `Last-Event-ID` / `?after=` JSONL replay
+        is deferred; durable history remains under `<repo>/.lazyorch/events/*.jsonl`.
+        CORS reflects an allowlist of local GUI origins (not `*`); Bearer is required
+        when the request carries an `Origin` header.
       operationId: streamEvents
       parameters:
         - name: project
           in: query
           description: Optional project_id filter
+          schema:
+            type: string
+        - name: after
+          in: query
+          description: Reserved for future event-id cursor replay (not implemented)
           schema:
             type: string
       responses:
@@ -143,4 +157,7 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: Token from ~/.lazyorch/daemon.token (required off-loopback)
+      description: |
+        Token from ~/.lazyorch/daemon.token (mode 0600 / Windows user ACL).
+        Required off-loopback, when Origin is present, or with --require-auth.
+        Health endpoints remain public.

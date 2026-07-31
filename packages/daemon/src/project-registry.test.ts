@@ -2,7 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
-import { ProjectRegistry } from "./project-registry.js";
+import {
+  ProjectRegistry,
+  RegistryConflictError,
+} from "./project-registry.js";
 import { projectsRegistryPath } from "./paths.js";
 
 const temps: string[] = [];
@@ -71,5 +74,23 @@ describe("ProjectRegistry", () => {
     expect(await reg.unregister("proj_x")).toBe(true);
     expect(await reg.list()).toHaveLength(0);
     expect(await reg.unregister("proj_x")).toBe(false);
+  });
+
+  it("rejects cross id/root rebind that would duplicate roots", async () => {
+    const home = await tempHome();
+    const reg = new ProjectRegistry(home);
+    const a = join(home, "a");
+    const b = join(home, "b");
+    await reg.register({ id: "proj_a", repo_root: a, name: "A" });
+    await reg.register({ id: "proj_b", repo_root: b, name: "B" });
+
+    await expect(
+      reg.register({ id: "proj_a", repo_root: b, name: "collide" }),
+    ).rejects.toBeInstanceOf(RegistryConflictError);
+
+    const list = await reg.list();
+    expect(list).toHaveLength(2);
+    expect(list.find((p) => p.id === "proj_a")?.repo_root).toContain("a");
+    expect(list.find((p) => p.id === "proj_b")?.repo_root).toContain("b");
   });
 });

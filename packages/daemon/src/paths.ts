@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 /** Default loopback bind host. */
 export const DEFAULT_HOST = "127.0.0.1" as const;
@@ -13,6 +13,9 @@ export const PORT_RANGE_END = 7430 as const;
 /** HTTP/WS API major version for client negotiation. */
 export const API_MAJOR = 1 as const;
 
+/** Safe run_id / event file id: alphanumerics, underscore, hyphen. */
+const SAFE_EVENT_ID = /^[A-Za-z0-9_-]+$/;
+
 /**
  * Resolve the user-level LazyOrch state directory.
  * Override via `homeDir` (tests) or `LAZYORCH_HOME` env.
@@ -25,7 +28,11 @@ export function userLazyorchDir(homeDir?: string): string {
     process.env.LAZYORCH_HOME ??
     resolveUserHome();
   // If LAZYORCH_HOME / homeDir already points at `.lazyorch`, use as-is.
-  if (base.endsWith(".lazyorch") || base.endsWith(".lazyorch/") || base.endsWith(".lazyorch\\")) {
+  if (
+    base.endsWith(".lazyorch") ||
+    base.endsWith(".lazyorch/") ||
+    base.endsWith(".lazyorch\\")
+  ) {
     return base;
   }
   return join(base, ".lazyorch");
@@ -63,8 +70,36 @@ export function projectEventsDir(repoRoot: string): string {
   return join(repoRoot, ".lazyorch", "events");
 }
 
-/** Event JSONL path for a run (or `_global` when runId omitted). */
+/**
+ * Sanitize a run_id for use as an events filename segment.
+ * Rejects path separators, `.`/`..`, and empty ids.
+ */
+export function sanitizeEventFileId(runId: string | undefined): string {
+  if (runId === undefined || runId.trim() === "") return "_global";
+  const id = runId.trim();
+  if (id === "." || id === ".." || !SAFE_EVENT_ID.test(id)) {
+    throw new Error(
+      `Invalid run_id for events path: must match ${SAFE_EVENT_ID} (got ${JSON.stringify(runId)})`,
+    );
+  }
+  return id;
+}
+
+/**
+ * Event JSONL path for a run (or `_global` when runId omitted).
+ * Asserts the resolved path stays under the project events dir.
+ */
 export function eventJsonlPath(repoRoot: string, runId?: string): string {
-  const id = runId && runId.length > 0 ? runId : "_global";
-  return join(projectEventsDir(repoRoot), `${id}.jsonl`);
+  const id = sanitizeEventFileId(runId);
+  const eventsDir = resolve(projectEventsDir(repoRoot));
+  const path = resolve(eventsDir, `${id}.jsonl`);
+  const prefix = eventsDir.endsWith(sep) ? eventsDir : eventsDir + sep;
+  if (path !== eventsDir && !path.startsWith(prefix)) {
+    throw new Error(`Event path escapes events directory: ${path}`);
+  }
+  // Also reject if path equals eventsDir without filename (shouldn't happen)
+  if (!path.endsWith(".jsonl")) {
+    throw new Error(`Event path invalid: ${path}`);
+  }
+  return path;
 }

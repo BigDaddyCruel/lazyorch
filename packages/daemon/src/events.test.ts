@@ -119,3 +119,13 @@ describe("EventBus", () => {
     expect(seen).toEqual(["1", "2"]);
   });
 });
+
+describe("eventJsonlPath safety", () => {
+  it("rejects path traversal run_ids", async () => {
+    const root = await tempRoot();
+    expect(() => eventJsonlPath(root, "../../evil")).toThrow(/Invalid run_id/);
+    expect(() => eventJsonlPath(root, "..")).toThrow(/Invalid run_id/);
+    expect(() => eventJsonlPath(root, "a/b")).toThrow(/Invalid run_id/);
+    expect(() => eventJsonlPath(root, "a\\b")).toThrow(/Invalid run_id/);
+  });
+});

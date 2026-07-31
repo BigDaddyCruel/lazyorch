@@ -3,16 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
 import {
+  acquireDaemonLockExclusive,
   buildLock,
   inspectDaemonLock,
   isPidAlive,
   readDaemonLock,
   removeDaemonLock,
+  tryCreateDaemonLockExclusive,
   writeDaemonLock,
   writeDaemonToken,
   readDaemonToken,
 } from "./lockfile.js";
-import { daemonLockPath } from "./paths.js";
+import { daemonLockPath, daemonTokenPath } from "./paths.js";
+import { access, constants as fsConstants } from "node:fs/promises";
 
 const temps: string[] = [];
 
@@ -87,5 +90,39 @@ describe("lockfile", () => {
     );
     expect(await removeDaemonLock(home, { expectedPid: process.pid })).toBe(true);
     expect(await readDaemonLock(home)).toBeNull();
+  });
+
+  it("exclusive lock create is single-winner", async () => {
+    const home = await tempHome();
+    const lock = buildLock({
+      port: 7420,
+      tokenPath: daemonTokenPath(home),
+      pid: process.pid,
+    });
+    expect(await tryCreateDaemonLockExclusive(lock, home)).toBe(true);
+    expect(await tryCreateDaemonLockExclusive(lock, home)).toBe(false);
+
+    await removeDaemonLock(home, { force: true });
+    // stale foreign pid → acquire clears and succeeds
+    await writeDaemonLock(
+      buildLock({
+        port: 7420,
+        tokenPath: daemonTokenPath(home),
+        pid: 2_147_483_646,
+      }),
+      home,
+    );
+    if (!isPidAlive(2_147_483_646)) {
+      await acquireDaemonLockExclusive(lock, home);
+      const read = await readDaemonLock(home);
+      expect(read?.pid).toBe(process.pid);
+    }
+  });
+
+  it("token file is written and readable by owner", async () => {
+    const home = await tempHome();
+    const { path } = await writeDaemonToken(home, "abc");
+    await access(path, fsConstants.R_OK);
+    expect(await readDaemonToken(home)).toBe("abc");
   });
 });

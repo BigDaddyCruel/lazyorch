@@ -23,9 +23,6 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
-    "@lazyorch/adapters": "workspace:*",
-    "@lazyorch/core": "workspace:*",
-    "@lazyorch/forge": "workspace:*",
     "@lazyorch/shared": "workspace:*"
   },
   "devDependencies": {

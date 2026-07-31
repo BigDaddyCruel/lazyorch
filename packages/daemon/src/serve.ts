@@ -1,11 +1,17 @@
 import { createServer as createNetServer } from "node:net";
+import { appendFile, mkdir } from "node:fs/promises";
 import {
   API_MAJOR,
   DEFAULT_HOST,
   DEFAULT_PORT,
   PORT_RANGE_END,
+  daemonLogPath,
+  userLazyorchDir,
 } from "./paths.js";
 import {
+  ApiMajorMismatchError,
+  acquireDaemonLockExclusive,
+  assertApiMajor,
   buildLock,
   inspectDaemonLock,
   readDaemonToken,
@@ -26,7 +32,7 @@ export interface ServeOptions {
   /** Override user home / LAZYORCH_HOME for state dir. */
   homeDir?: string;
   host?: string;
-  /** Preferred port; if busy, scan up to PORT_RANGE_END unless fixedPort. */
+  /** Preferred port; if busy, scan up to PORT_RANGE_END unless fixedPort. port 0 = OS ephemeral. */
   port?: number;
   /** When true, do not scan — fail if preferred port is taken. */
   fixedPort?: boolean;
@@ -36,6 +42,8 @@ export interface ServeOptions {
   requireAuth?: boolean;
   /** Pre-set token (tests). */
   token?: string;
+  /** Append a start line to daemon.log (default true). */
+  writeLog?: boolean;
 }
 
 export interface ServeResult {
@@ -95,7 +103,7 @@ export async function pickPort(
 }
 
 /**
- * Start the user-level daemon (HTTP + SSE) with lockfile single-instance.
+ * Start the user-level daemon (HTTP + SSE) with exclusive lockfile single-instance.
  * If a healthy daemon already holds the lock and `attachIfRunning` is true
  * (default), returns that endpoint without starting a second instance.
  */
@@ -110,7 +118,7 @@ export async function startDaemon(
   if (attachIfRunning) {
     const existing = await inspectDaemonLock(homeDir);
     if (existing.healthy && existing.lock) {
-      // Optional HTTP probe
+      assertApiMajor(existing.lock);
       const healthy = await probeHealth(existing.lock.host, existing.lock.port);
       if (healthy) {
         const token =
@@ -133,24 +141,67 @@ export async function startDaemon(
     }
   }
 
-  // port 0 → OS-assigned ephemeral (reliable in tests; avoids Windows excluded ranges)
-  const wantEphemeral = preferred === 0;
-  const portHint = wantEphemeral
-    ? 0
-    : await pickPort(preferred, host, options.fixedPort === true);
-
+  // Token before exclusive lock so path is known for provisional record
   const { path: tokenPath, token } = await writeDaemonToken(
     homeDir,
     options.token,
   );
   const startedAt = new Date().toISOString();
 
+  // Exclusive lock claim BEFORE bind (prevents dual-daemon race)
+  const provisional = buildLock({
+    port: preferred === 0 ? 0 : preferred,
+    host,
+    tokenPath,
+    startedAt,
+  });
+  try {
+    await acquireDaemonLockExclusive(provisional, homeDir, {
+      force: !attachIfRunning,
+    });
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code: unknown }).code === "lock_held" &&
+      "lock" in err
+    ) {
+      const held = (err as { lock: DaemonLock }).lock;
+      assertApiMajor(held);
+      if (attachIfRunning) {
+        const healthy = await probeHealth(held.host, held.port);
+        if (healthy) {
+          const t = (await readDaemonToken(homeDir)) ?? token;
+          return {
+            started: false,
+            host: held.host,
+            port: held.port,
+            url: `http://${held.host}:${held.port}`,
+            token: t,
+            lock: held,
+          };
+        }
+      }
+    }
+    throw err;
+  }
+
+  const wantEphemeral = preferred === 0;
+  let portHint: number;
+  try {
+    portHint = wantEphemeral
+      ? 0
+      : await pickPort(preferred, host, options.fixedPort === true);
+  } catch (err) {
+    await removeDaemonLock(homeDir, { force: true, expectedPid: process.pid });
+    throw err;
+  }
+
   const registry = new ProjectRegistry(homeDir);
-  // Ensure registry file exists
   await registry.load();
   const bus = new EventBus();
 
-  // Create server first; bind, then write lock with the real port.
   const httpCtx: DaemonHttpContext = {
     registry,
     bus,
@@ -164,51 +215,70 @@ export async function startDaemon(
   }
   const http = createDaemonHttpServer(httpCtx);
 
-  await new Promise<void>((resolve, reject) => {
-    http.server.once("error", reject);
-    http.server.listen(portHint, host, () => resolve());
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      http.server.once("error", reject);
+      http.server.listen(portHint, host, () => resolve());
+    });
 
-  const addr = http.server.address();
-  if (!addr || typeof addr === "string") {
-    await http.close().catch(() => undefined);
-    throw new Error("Failed to bind daemon HTTP server");
+    const addr = http.server.address();
+    if (!addr || typeof addr === "string") {
+      throw new Error("Failed to bind daemon HTTP server");
+    }
+    const port = addr.port;
+    http.ctx.port = port;
+
+    const lock = buildLock({
+      port,
+      host,
+      tokenPath,
+      startedAt,
+    });
+    await writeDaemonLock(lock, homeDir);
+
+    if (options.writeLog !== false) {
+      await appendDaemonLog(
+        homeDir,
+        `started pid=${process.pid} url=http://${host}:${port} at=${startedAt}\n`,
+      );
+    }
+
+    bus.publish(
+      createEvent({
+        project_id: "_daemon",
+        type: "daemon.started",
+        payload: {
+          host,
+          port,
+          api_major: API_MAJOR,
+          pid: process.pid,
+        },
+      }),
+    );
+
+    return {
+      started: true,
+      host,
+      port,
+      url: `http://${host}:${port}`,
+      token,
+      lock,
+      http,
+      registry,
+      bus,
+    };
+  } catch (err) {
+    try {
+      await http.close();
+    } catch {
+      /* ignore */
+    }
+    await removeDaemonLock(homeDir, {
+      force: true,
+      expectedPid: process.pid,
+    });
+    throw err;
   }
-  const port = addr.port;
-  http.ctx.port = port;
-
-  const lock = buildLock({
-    port,
-    host,
-    tokenPath,
-    startedAt,
-  });
-  await writeDaemonLock(lock, homeDir);
-
-  bus.publish(
-    createEvent({
-      project_id: "_daemon",
-      type: "daemon.started",
-      payload: {
-        host,
-        port,
-        api_major: API_MAJOR,
-        pid: process.pid,
-      },
-    }),
-  );
-
-  return {
-    started: true,
-    host,
-    port,
-    url: `http://${host}:${port}`,
-    token,
-    lock,
-    http,
-    registry,
-    bus,
-  };
 }
 
 /**
@@ -226,10 +296,24 @@ export async function stopDaemon(
       expectedPid: result.lock.pid,
       force: false,
     });
+    await appendDaemonLog(
+      homeDir,
+      `stopped pid=${result.lock.pid} at=${new Date().toISOString()}\n`,
+    ).catch(() => undefined);
   }
 }
 
+export async function appendDaemonLog(
+  homeDir: string | undefined,
+  line: string,
+): Promise<void> {
+  const dir = userLazyorchDir(homeDir);
+  await mkdir(dir, { recursive: true });
+  await appendFile(daemonLogPath(homeDir), line, "utf8");
+}
+
 async function probeHealth(host: string, port: number): Promise<boolean> {
+  if (port <= 0) return false;
   const url = `http://${host}:${port}/health`;
   try {
     const ac = new AbortController();
@@ -237,8 +321,12 @@ async function probeHealth(host: string, port: number): Promise<boolean> {
     try {
       const res = await fetch(url, { signal: ac.signal });
       if (!res.ok) return false;
-      const body = (await res.json()) as { ok?: boolean };
-      return body.ok === true;
+      const body = (await res.json()) as { ok?: boolean; api_major?: number };
+      if (body.ok !== true) return false;
+      if (typeof body.api_major === "number" && body.api_major !== API_MAJOR) {
+        return false;
+      }
+      return true;
     } finally {
       clearTimeout(t);
     }
@@ -246,3 +334,5 @@ async function probeHealth(host: string, port: number): Promise<boolean> {
     return false;
   }
 }
+
+export { ApiMajorMismatchError };

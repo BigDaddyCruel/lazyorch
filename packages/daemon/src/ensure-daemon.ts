@@ -2,10 +2,13 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
+  API_MAJOR,
   DEFAULT_HOST,
   DEFAULT_PORT,
 } from "./paths.js";
 import {
+  ApiMajorMismatchError,
+  assertApiMajor,
   inspectDaemonLock,
   readDaemonToken,
 } from "./lockfile.js";
@@ -47,7 +50,7 @@ export interface EnsureDaemonOptions {
  *
  * Discovery order:
  * 1. `LAZYORCH_URL` env (if useEnvUrl)
- * 2. Healthy `daemon.lock` + HTTP /health
+ * 2. Healthy `daemon.lock` + HTTP /health (API major must match)
  * 3. Auto-start per `mode`
  */
 export async function ensureDaemon(
@@ -77,6 +80,7 @@ export async function ensureDaemon(
 
   const inspected = await inspectDaemonLock(homeDir);
   if (inspected.healthy && inspected.lock) {
+    assertApiMajor(inspected.lock);
     const url = `http://${inspected.lock.host}:${inspected.lock.port}`;
     const ok = await probe(url);
     if (ok) {
@@ -95,7 +99,7 @@ export async function ensureDaemon(
 
   if (mode === "none") {
     throw new Error(
-      "LazyOrch daemon is not running (lock missing or unhealthy); start with `lazyorch serve`",
+      "LazyOrch daemon is not running (lock missing or unhealthy); start with `lazyorchd serve`",
     );
   }
 
@@ -154,8 +158,12 @@ async function probe(url: string): Promise<boolean> {
         signal: ac.signal,
       });
       if (!res.ok) return false;
-      const body = (await res.json()) as { ok?: boolean };
-      return body.ok === true;
+      const body = (await res.json()) as { ok?: boolean; api_major?: number };
+      if (body.ok !== true) return false;
+      if (typeof body.api_major === "number" && body.api_major !== API_MAJOR) {
+        return false;
+      }
+      return true;
     } finally {
       clearTimeout(t);
     }
@@ -194,6 +202,12 @@ async function spawnBackgroundDaemon(
     await sleep(100);
     const inspected = await inspectDaemonLock(options.homeDir);
     if (inspected.healthy && inspected.lock) {
+      try {
+        assertApiMajor(inspected.lock);
+      } catch (err) {
+        if (err instanceof ApiMajorMismatchError) throw err;
+        throw err;
+      }
       const url = `http://${inspected.lock.host}:${inspected.lock.port}`;
       if (await probe(url)) {
         const token = (await readDaemonToken(options.homeDir)) ?? "";
@@ -216,7 +230,6 @@ async function spawnBackgroundDaemon(
 }
 
 function resolveDaemonEntry(): string {
-  // Prefer this package's dist entry when running from source/tests
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     return join(here, "index.js");

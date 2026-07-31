@@ -4,7 +4,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
 import { API_MAJOR, DEFAULT_HOST } from "./paths.js";
 import {
@@ -13,7 +13,25 @@ import {
   createEvent,
   type EventEnvelope,
 } from "./events.js";
-import type { ProjectRegistry, RegisteredProject } from "./project-registry.js";
+import {
+  RegistryConflictError,
+  type ProjectRegistry,
+  type RegisteredProject,
+} from "./project-registry.js";
+
+/** Max JSON body size for stub POSTs (bytes). */
+export const MAX_BODY_BYTES = 64 * 1024;
+
+/** Origins allowed for local GUI / Tauri dev (reflected CORS, not *). */
+const ALLOWED_ORIGINS = new Set([
+  "http://127.0.0.1:1420",
+  "http://localhost:1420",
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+]);
 
 export interface DaemonHttpContext {
   registry: ProjectRegistry;
@@ -22,7 +40,7 @@ export interface DaemonHttpContext {
   startedAt: string;
   host: string;
   port: number;
-  /** When true, require Bearer token even on loopback (tests can disable). */
+  /** When true, require Bearer token even on loopback. */
   requireAuth?: boolean;
 }
 
@@ -31,6 +49,8 @@ export interface DaemonHttpServer {
   ctx: DaemonHttpContext;
   /** In-memory run stubs keyed by project id (empty until later PRs). */
   runs: Map<string, StubRun[]>;
+  /** Active SSE responses (for clean shutdown). */
+  sseClients: Set<ServerResponse>;
   close(): Promise<void>;
 }
 
@@ -55,16 +75,41 @@ function sendJson(
   res.end(payload);
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+export function readBody(
+  req: IncomingMessage,
+  maxBytes: number = MAX_BODY_BYTES,
+): Promise<string> {
   return new Promise((resolveBody, reject) => {
     const chunks: Buffer[] = [];
+    let total = 0;
+    let rejected = false;
+
+    const fail = (statusError: Error & { statusCode?: number }): void => {
+      if (rejected) return;
+      rejected = true;
+      req.destroy();
+      reject(statusError);
+    };
+
     req.on("data", (c: Buffer) => {
+      total += c.length;
+      if (total > maxBytes) {
+        const err = new Error(`Request body exceeds ${maxBytes} bytes`) as Error & {
+          statusCode?: number;
+        };
+        err.statusCode = 413;
+        fail(err);
+        return;
+      }
       chunks.push(c);
     });
     req.on("end", () => {
+      if (rejected) return;
       resolveBody(Buffer.concat(chunks).toString("utf8"));
     });
-    req.on("error", reject);
+    req.on("error", (err) => {
+      if (!rejected) reject(err);
+    });
   });
 }
 
@@ -72,25 +117,63 @@ function parseUrl(req: IncomingMessage): URL {
   return new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
 }
 
+function isLoopbackAddress(remote: string | undefined): boolean {
+  if (remote === undefined || remote === "") return false;
+  return (
+    remote === "127.0.0.1" ||
+    remote === "::1" ||
+    remote === "::ffff:127.0.0.1"
+  );
+}
+
+/** Constant-time Bearer token compare (equal-length buffers). */
+export function tokensEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
 function checkAuth(
   req: IncomingMessage,
   ctx: DaemonHttpContext,
 ): boolean {
   if (ctx.requireAuth === false) return true;
-  // Loopback-only v1: token recommended but not required on loopback
-  const remote = req.socket.remoteAddress ?? "";
-  const isLoopback =
-    remote === "127.0.0.1" ||
-    remote === "::1" ||
-    remote === "::ffff:127.0.0.1" ||
-    remote === "";
-  if (isLoopback && ctx.requireAuth !== true) return true;
+
+  const remote = req.socket.remoteAddress;
+  const origin = req.headers.origin;
+  // Browser requests (Origin present) always require Bearer — CSRF mitigation
+  // for loopback APIs reachable from web pages.
+  const forceAuth =
+    ctx.requireAuth === true ||
+    typeof origin === "string" ||
+    !isLoopbackAddress(remote);
+
+  if (!forceAuth) return true;
 
   const header = req.headers.authorization;
   if (!header) return false;
   const m = /^Bearer\s+(.+)$/i.exec(header);
-  if (!m) return false;
-  return m[1] === ctx.token;
+  if (!m || m[1] === undefined) return false;
+  return tokensEqual(m[1], ctx.token);
+}
+
+function applyCors(req: IncomingMessage, res: ServerResponse): void {
+  const origin = req.headers.origin;
+  if (typeof origin !== "string") return;
+  if (ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Authorization, Content-Type, Last-Event-ID",
+    );
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, DELETE, OPTIONS",
+    );
+  }
+  // Unlisted origins get no ACAO (browser blocks). Auth still required when Origin set.
 }
 
 /**
@@ -100,12 +183,24 @@ export function createDaemonHttpServer(
   ctx: DaemonHttpContext,
 ): DaemonHttpServer {
   const runs = new Map<string, StubRun[]>();
+  const sseClients = new Set<ServerResponse>();
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res, ctx, runs).catch((err: unknown) => {
+    void handleRequest(req, res, ctx, runs, sseClients).catch((err: unknown) => {
+      const statusCode =
+        typeof err === "object" &&
+        err !== null &&
+        "statusCode" in err &&
+        typeof (err as { statusCode: unknown }).statusCode === "number"
+          ? (err as { statusCode: number }).statusCode
+          : 500;
       const msg = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) {
-        sendJson(res, 500, { error: "internal_error", message: msg });
+        if (statusCode === 413) {
+          sendJson(res, 413, { error: "payload_too_large", message: msg });
+        } else {
+          sendJson(res, 500, { error: "internal_error", message: msg });
+        }
       } else {
         res.end();
       }
@@ -116,8 +211,21 @@ export function createDaemonHttpServer(
     server,
     ctx,
     runs,
+    sseClients,
     close: () =>
       new Promise((resolveClose, reject) => {
+        // End SSE streams so keep-alive sockets do not hang close()
+        for (const client of sseClients) {
+          try {
+            client.end();
+          } catch {
+            /* ignore */
+          }
+        }
+        sseClients.clear();
+        if (typeof server.closeAllConnections === "function") {
+          server.closeAllConnections();
+        }
         server.close((err) => {
           if (err) reject(err);
           else resolveClose();
@@ -131,15 +239,13 @@ async function handleRequest(
   res: ServerResponse,
   ctx: DaemonHttpContext,
   runs: Map<string, StubRun[]>,
+  sseClients: Set<ServerResponse>,
 ): Promise<void> {
   const url = parseUrl(req);
   const method = (req.method ?? "GET").toUpperCase();
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
-  // CORS-ish for local GUI dev
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  applyCors(req, res);
   if (method === "OPTIONS") {
     res.writeHead(204);
     res.end();
@@ -189,7 +295,24 @@ async function handleRequest(
   }
 
   if (method === "POST" && path === "/v1/projects/init") {
-    const raw = await readBody(req);
+    let raw: string;
+    try {
+      raw = await readBody(req);
+    } catch (err) {
+      const status =
+        typeof err === "object" &&
+        err !== null &&
+        "statusCode" in err &&
+        typeof (err as { statusCode: unknown }).statusCode === "number"
+          ? (err as { statusCode: number }).statusCode
+          : 500;
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, status, {
+        error: status === 413 ? "payload_too_large" : "body_error",
+        message: msg,
+      });
+      return;
+    }
     let body: { repo_root?: string; id?: string; name?: string } = {};
     if (raw.trim() !== "") {
       try {
@@ -215,7 +338,17 @@ async function handleRequest(
       repo_root: resolve(body.repo_root),
     };
     if (typeof body.name === "string") regInput.name = body.name;
-    const project = await ctx.registry.register(regInput);
+
+    let project;
+    try {
+      project = await ctx.registry.register(regInput);
+    } catch (err) {
+      if (err instanceof RegistryConflictError) {
+        sendJson(res, 409, { error: "registry_conflict", message: err.message });
+        return;
+      }
+      throw err;
+    }
 
     const event = createEvent({
       project_id: project.id,
@@ -253,7 +386,6 @@ async function handleRequest(
   }
 
   if (method === "GET" && path === "/v1/adapters") {
-    // Stub until PR-08 adapter registry
     sendJson(res, 200, {
       adapters: [
         {
@@ -293,7 +425,6 @@ async function handleRequest(
   }
 
   if (method === "GET" && path === "/v1/models/route") {
-    // Stub dry-run complexity router
     const role = url.searchParams.get("role") ?? "worker";
     const taskId = url.searchParams.get("task") ?? undefined;
     sendJson(res, 200, {
@@ -309,20 +440,26 @@ async function handleRequest(
   }
 
   if (method === "GET" && path === "/v1/events") {
-    await handleSse(req, res, ctx, url);
+    handleSse(req, res, ctx, url, sseClients);
     return;
   }
 
   sendJson(res, 404, { error: "not_found", path, method });
 }
 
-async function handleSse(
+function handleSse(
   req: IncomingMessage,
   res: ServerResponse,
   ctx: DaemonHttpContext,
   url: URL,
-): Promise<void> {
+  sseClients: Set<ServerResponse>,
+): void {
   const projectFilter = url.searchParams.get("project") ?? undefined;
+
+  // Last-Event-ID / ?after= JSONL replay is deferred past PR-06 (ephemeral bus only).
+  // Clients reconnect with a fresh live stream; durable history remains in project JSONL.
+  void req.headers["last-event-id"];
+  void url.searchParams.get("after");
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -331,9 +468,13 @@ async function handleSse(
     "X-Accel-Buffering": "no",
   });
   res.write(`: connected\n\n`);
+  // Note: Last-Event-ID replay not implemented in PR-06 — live events only.
+
+  sseClients.add(res);
 
   const writeEvent = (event: EventEnvelope): void => {
     if (projectFilter && event.project_id !== projectFilter) return;
+    if (res.writableEnded) return;
     const id = event.id ?? "";
     if (id) res.write(`id: ${id}\n`);
     res.write(`event: ${event.type}\n`);
@@ -342,18 +483,21 @@ async function handleSse(
 
   const unsubscribe = ctx.bus.subscribe(writeEvent);
 
-  // Heartbeat
   const heartbeat = setInterval(() => {
-    res.write(`: ping ${Date.now()}\n\n`);
+    if (!res.writableEnded) {
+      res.write(`: ping ${Date.now()}\n\n`);
+    }
   }, 15000);
 
   const cleanup = (): void => {
     clearInterval(heartbeat);
     unsubscribe();
+    sseClients.delete(res);
   };
 
   req.on("close", cleanup);
   req.on("error", cleanup);
+  res.on("close", cleanup);
 }
 
 /** Helper for tests: list registered projects via context. */

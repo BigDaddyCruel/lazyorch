@@ -243,4 +243,56 @@ describe("daemon HTTP stubs", () => {
     expect(res.status).toBe(404);
     await http.close();
   });
+
+  it("requireAuth: Bearer required; health public", async () => {
+    const home = await tempHome();
+    const serve = await startDaemon({
+      homeDir: home,
+      port: 0,
+      attachIfRunning: false,
+      requireAuth: true,
+      token: "good-token",
+    });
+    serves.push({ serve, home });
+
+    const health = await fetch(`${serve.url}/health`);
+    expect(health.status).toBe(200);
+
+    const noTok = await fetch(`${serve.url}/v1/projects`);
+    expect(noTok.status).toBe(401);
+
+    const bad = await fetch(`${serve.url}/v1/projects`, {
+      headers: { Authorization: "Bearer wrong" },
+    });
+    expect(bad.status).toBe(401);
+
+    const ok = await fetch(`${serve.url}/v1/projects`, {
+      headers: { Authorization: "Bearer good-token" },
+    });
+    expect(ok.status).toBe(200);
+
+    await stopDaemon(serve, home);
+    dropServe(serve);
+  });
+
+  it("stopDaemon completes quickly with open SSE client", async () => {
+    const home = await tempHome();
+    const { base, serve } = await listenEphemeral(home);
+
+    const ac = new AbortController();
+    const res = await fetch(`${base}/v1/events`, { signal: ac.signal });
+    expect(res.status).toBe(200);
+    // leave stream open
+
+    const stop = stopDaemon(serve, home);
+    await expect(
+      Promise.race([
+        stop.then(() => "ok"),
+        new Promise<string>((r) => setTimeout(() => r("timeout"), 2000)),
+      ]),
+    ).resolves.toBe("ok");
+
+    ac.abort();
+    dropServe(serve);
+  });
 });
