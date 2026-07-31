@@ -1,0 +1,10 @@
+{
+  "name": "@lazyorch/gui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "LazyOrch desktop GUI (Tauri 2 + web UI) — placeholder",
+  "scripts": {
+    "typecheck": "echo \"GUI typecheck deferred until Tauri scaffold\"",
+    "build": "echo \"GUI build deferred until Tauri scaffold\""
+  }
+}
