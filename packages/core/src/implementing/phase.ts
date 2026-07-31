@@ -66,6 +66,7 @@ import type {
   WorkerSessionPort,
 } from "./ports.js";
 import { applyQaOutcome, needsRunLevelQa } from "./qa.js";
+// applyQaOutcome also used for system auto-QA when max_qa=0
 import {
   applyConflictStormPolicy,
   applyTerminalFailedPolicy,
@@ -500,91 +501,125 @@ export async function implementingTick(
   escalated_task_ids.push(...terminal.escalated_task_ids);
 
   // 8. Run-level QA at tip when exit candidates need re-QA (ephemeral)
-  if (params.qa && params.run_qa !== false && needsRunLevelQa(run, tasks)) {
+  // Solo / max_qa=0: still allow exit — system/lead QA path (no agent slot),
+  // or auto-stamp pass when no QA port (shell-acceptance / system auto-QA).
+  if (params.run_qa !== false && needsRunLevelQa(run, tasks) && run.feature_tip_sha) {
+    const maxQa = config.team.max_qa;
     const freeSlots = Math.max(
       0,
       config.scheduling.max_concurrent_agents -
         countHoldingSlots(runtime.sessions),
     );
-    const canStart = canStartQaSession({
-      qa_work_pending: true,
-      active_qa: countActiveQa(runtime.sessions),
-      max_qa: config.team.max_qa,
-      free_slots: freeSlots,
-      mode_allows: config.team.mode !== "solo" || config.team.max_qa > 0,
-    });
+    /** When max_qa is 0 (solo), QA does not consume a role slot (system path). */
+    const systemQaPath = maxQa === 0;
+    const canStart = systemQaPath
+      ? true
+      : canStartQaSession({
+          qa_work_pending: true,
+          active_qa: countActiveQa(runtime.sessions),
+          max_qa: maxQa,
+          free_slots: freeSlots,
+          mode_allows: true,
+        });
 
-    if (canStart && run.feature_tip_sha) {
-      const preferred = preferredAdaptersForRole("qa");
-      const route: RouteResult = routeModel({
-        role: "qa",
-        preferred_adapters: [...preferred],
-        adapters: params.routing?.adapters ?? defaultAdaptersForRouting(),
-        ...(params.routing?.config !== undefined
-          ? { config: params.routing.config }
-          : {}),
-      });
-      const agentId = params.nextAgentId?.() ?? generateId("agt");
-      const runHandle = `qa_${run.id}_${nowMs}`;
-      const qaSession: SchedulerSession = {
-        run_handle: runHandle,
-        agent_id: agentId,
-        role: "qa",
-        state: "running",
-        adapter_id: route.adapter_id,
-        model: route.model,
-        model_tier: route.tier,
-        last_activity_ms: nowMs,
-      };
-      runtime = {
-        ...runtime,
-        sessions: [...runtime.sessions, qaSession],
-      };
+    if (canStart) {
+      if (params.qa) {
+        const preferred = preferredAdaptersForRole("qa");
+        const route: RouteResult = routeModel({
+          role: "qa",
+          preferred_adapters: [...preferred],
+          adapters: params.routing?.adapters ?? defaultAdaptersForRouting(),
+          ...(params.routing?.config !== undefined
+            ? { config: params.routing.config }
+            : {}),
+        });
+        const agentId = params.nextAgentId?.() ?? generateId("agt");
+        const runHandle = `qa_${run.id}_${nowMs}`;
+        // Register session only when counting toward max_qa / slots
+        if (!systemQaPath) {
+          const qaSession: SchedulerSession = {
+            run_handle: runHandle,
+            agent_id: agentId,
+            role: "qa",
+            state: "running",
+            adapter_id: route.adapter_id,
+            model: route.model,
+            model_tier: route.tier,
+            last_activity_ms: nowMs,
+          };
+          runtime = {
+            ...runtime,
+            sessions: [...runtime.sessions, qaSession],
+          };
+        }
 
-      const acceptance_hints = tasks
-        .filter((t) => t.status === "done")
-        .flatMap((t) => t.acceptance)
-        .slice(0, 20);
+        const acceptance_hints = tasks
+          .filter((t) => t.status === "done")
+          .flatMap((t) => t.acceptance)
+          .slice(0, 20);
 
-      const outcome = await params.qa.run({
-        run_id: run.id,
-        feature_tip_sha: run.feature_tip_sha,
-        ...(run.feature_branch !== undefined
-          ? { feature_branch: run.feature_branch }
-          : {}),
-        agent_id: agentId,
-        adapter_id: route.adapter_id,
-        model: route.model,
-        model_tier: route.tier,
-        session_kind: route.session_kind,
-        ...(route.effort !== undefined ? { effort: route.effort } : {}),
-        cwd,
-        run_handle: runHandle,
-        ...(acceptance_hints.length > 0 ? { acceptance_hints } : {}),
-      });
+        const outcome = await params.qa.run({
+          run_id: run.id,
+          feature_tip_sha: run.feature_tip_sha,
+          ...(run.feature_branch !== undefined
+            ? { feature_branch: run.feature_branch }
+            : {}),
+          agent_id: agentId,
+          adapter_id: systemQaPath ? "shell" : route.adapter_id,
+          model: systemQaPath ? "system" : route.model,
+          model_tier: systemQaPath ? null : route.tier,
+          session_kind: systemQaPath ? "deterministic" : route.session_kind,
+          ...(route.effort !== undefined && !systemQaPath
+            ? { effort: route.effort }
+            : {}),
+          cwd,
+          run_handle: runHandle,
+          ...(acceptance_hints.length > 0 ? { acceptance_hints } : {}),
+        });
 
-      const applied = applyQaOutcome(run, tasks, outcome, {
-        feature_tip_sha: run.feature_tip_sha,
-        ...(params.now !== undefined ? { now: params.now } : {}),
-        ...(params.nextTaskId !== undefined
-          ? { nextTaskId: params.nextTaskId }
-          : {}),
-      });
-      run = applied.run;
-      tasks = applied.tasks;
-      qa_outcomes.push({
-        passed: applied.passed,
-        ...(outcome.summary !== undefined ? { summary: outcome.summary } : {}),
-      });
-      for (const ft of applied.fix_tasks) {
-        qa_fix_task_ids.push(ft.id);
+        const applied = applyQaOutcome(run, tasks, outcome, {
+          feature_tip_sha: run.feature_tip_sha,
+          ...(params.now !== undefined ? { now: params.now } : {}),
+          ...(params.nextTaskId !== undefined
+            ? { nextTaskId: params.nextTaskId }
+            : {}),
+        });
+        run = applied.run;
+        tasks = applied.tasks;
+        qa_outcomes.push({
+          passed: applied.passed,
+          ...(outcome.summary !== undefined
+            ? { summary: outcome.summary }
+            : {}),
+        });
+        for (const ft of applied.fix_tasks) {
+          qa_fix_task_ids.push(ft.id);
+        }
+
+        if (!systemQaPath) {
+          runtime = {
+            ...runtime,
+            sessions: runtime.sessions.filter(
+              (s) => s.run_handle !== runHandle,
+            ),
+          };
+        }
+      } else if (systemQaPath) {
+        // No QA port + max_qa=0: system auto-pass at tip (solo shell acceptance).
+        run = applyQaOutcome(
+          run,
+          tasks,
+          { passed: true, summary: "system auto-QA (max_qa=0)" },
+          {
+            feature_tip_sha: run.feature_tip_sha,
+            ...(params.now !== undefined ? { now: params.now } : {}),
+          },
+        ).run;
+        qa_outcomes.push({
+          passed: true,
+          summary: "system auto-QA (max_qa=0)",
+        });
       }
-
-      // Ephemeral QA exits after outcome
-      runtime = {
-        ...runtime,
-        sessions: runtime.sessions.filter((s) => s.run_handle !== runHandle),
-      };
     }
   }
 

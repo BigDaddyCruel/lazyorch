@@ -122,6 +122,7 @@ export async function runPrePrPhase(
 
 /**
  * PROpen tick: hand off to CILoop (instantaneous after ensure).
+ * Requires a ready (non-draft) pr_ref — otherwise re-run PrePR / ensure_ready_pr.
  */
 export function runPrOpenPhase(
   run: Run,
@@ -130,13 +131,12 @@ export function runPrOpenPhase(
   if (run.phase !== "PROpen") {
     throw new Error(`runPrOpenPhase requires PROpen, got ${run.phase}`);
   }
-  const ts = opts?.now?.() ?? new Date().toISOString();
-  if (!hasReadyPr(run.pr_ref) && run.pr_ref?.state !== "ready") {
-    // still allow transition if pr_ref ready-ish
-    if (run.pr_ref && run.pr_ref.state === "draft") {
-      throw new Error("runPrOpenPhase: pr_ref still draft; re-run PrePR");
-    }
+  if (!hasReadyPr(run.pr_ref)) {
+    throw new Error(
+      "runPrOpenPhase: requires ready pr_ref; re-run PrePR / ensure_ready_pr",
+    );
   }
+  const ts = opts?.now?.() ?? new Date().toISOString();
   const next = transitionRunPhase(run, "CILoop", { updated_at: ts });
   return {
     run: next,

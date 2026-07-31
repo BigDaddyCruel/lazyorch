@@ -4,10 +4,15 @@
  */
 
 import { generateId } from "@lazyorch/shared";
-import { resolveGate } from "../planning/gates.js";
+import {
+  createDynamicFixTasks,
+  invalidateRunQa,
+} from "../implementing/qa.js";
 import { transitionRunPhase } from "../orchestrator/run-fsm.js";
+import { resolveGate } from "../planning/gates.js";
 import type { Gate } from "../types/gate.js";
 import type { Run } from "../types/run.js";
+import type { Task } from "../types/task.js";
 
 const DEFAULT_TIMEOUT_NOTIFY_HOURS = 1;
 
@@ -187,4 +192,86 @@ export function shouldAutoMerge(opts: {
   if (opts.merge_gate === "auto") return true;
   if (!opts.gates_merge) return true;
   return false;
+}
+
+/**
+ * Approve all pending merge gates for a run/PR (used when forge merge succeeds
+ * via auto or merge_approved without an earlier applyMergeGateDecision).
+ */
+export function resolvePendingMergeGates(
+  gates: readonly Gate[],
+  runId: string,
+  opts?: {
+    pr_number?: number;
+    resolved_by?: string;
+    now?: () => string;
+  },
+): Gate[] {
+  const ts = nowIso(opts?.now);
+  const nowFn = () => ts;
+  return gates.map((g) => {
+    if (g.type !== "merge" || g.status !== "pending" || g.run_id !== runId) {
+      return g;
+    }
+    if (
+      opts?.pr_number !== undefined &&
+      g.payload.pr_number !== opts.pr_number
+    ) {
+      return g;
+    }
+    return resolveGate(g, "approved", {
+      now: nowFn,
+      require_pending: true,
+      ...(opts?.resolved_by !== undefined
+        ? { resolved_by: opts.resolved_by }
+        : { resolved_by: "system" }),
+      payload: { resolved_via: "merge_success" },
+    });
+  });
+}
+
+export interface ApplyChangesRequestedOpts {
+  summary?: string;
+  now?: () => string;
+  nextTaskId?: () => string;
+  scope?: readonly string[];
+}
+
+export interface ApplyChangesRequestedResult {
+  run: Run;
+  tasks: Task[];
+  fix_tasks: Task[];
+}
+
+/**
+ * MergeReady → Implementing with dynamic "changes requested" tasks.
+ * Invalidates run-level QA so re-exit requires re-QA at tip.
+ */
+export function applyChangesRequested(
+  run: Run,
+  tasks: readonly Task[],
+  opts?: ApplyChangesRequestedOpts,
+): ApplyChangesRequestedResult {
+  if (run.phase !== "MergeReady") {
+    throw new Error(
+      `applyChangesRequested requires MergeReady, got ${run.phase}`,
+    );
+  }
+  const ts = nowIso(opts?.now);
+  const fix_tasks = createDynamicFixTasks({
+    run_id: run.id,
+    reason: "changes_requested",
+    summary: opts?.summary ?? "Changes requested on PR",
+    ...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
+    ...(opts?.nextTaskId !== undefined
+      ? { nextTaskId: opts.nextTaskId }
+      : {}),
+  });
+  let next = transitionRunPhase(run, "Implementing", { updated_at: ts });
+  next = invalidateRunQa(next, () => ts);
+  return {
+    run: next,
+    tasks: [...tasks, ...fix_tasks],
+    fix_tasks,
+  };
 }

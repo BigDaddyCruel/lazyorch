@@ -37,9 +37,13 @@ export {
   applyMergeGateDecision,
   applyMerged,
   shouldAutoMerge,
+  resolvePendingMergeGates,
+  applyChangesRequested,
   type CreateMergeGateOpts,
   type MergeGateDecision,
   type ApplyMergeGateDecisionResult,
+  type ApplyChangesRequestedOpts,
+  type ApplyChangesRequestedResult,
 } from "./merge-gate.js";
 
 export {

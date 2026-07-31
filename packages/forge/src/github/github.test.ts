@@ -186,10 +186,29 @@ describe("ensureDraftPr", () => {
 });
 
 describe("evaluateChecks / pollCheckStatus", () => {
-  it("empty required + no checks ⇒ pending", () => {
-    const r = evaluateChecks([], []);
-    expect(r.pending).toBe(true);
+  it("empty required never greens (must configure forge.required_checks)", () => {
+    const empty = evaluateChecks([], []);
+    expect(empty.pending).toBe(true);
+    expect(empty.required_green).toBe(false);
+    expect(empty.pending_checks).toContain("*configure_required_checks");
+
+    // All reported checks ok still pending without named required list
+    const allOk = evaluateChecks(
+      [{ name: "ci", status: "completed", conclusion: "success" }],
+      [],
+    );
+    expect(allOk.required_green).toBe(false);
+    expect(allOk.pending).toBe(true);
+  });
+
+  it("empty required still fails on reported failure", () => {
+    const r = evaluateChecks(
+      [{ name: "ci", status: "completed", conclusion: "failure" }],
+      [],
+    );
+    expect(r.required_failed).toBe(true);
     expect(r.required_green).toBe(false);
+    expect(r.failed_checks).toEqual(["ci"]);
   });
 
   it("required names missing ⇒ pending", () => {

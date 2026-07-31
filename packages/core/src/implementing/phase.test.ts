@@ -620,6 +620,82 @@ describe("implementingTick — assign/review/integrate loop", () => {
     expect(tick.exited).toBe(true);
     expect(tick.run.phase).toBe("CILoop");
   });
+
+  it("solo max_qa=0 still exits via system QA path", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const qa = new FakeQaSession({ defaultQueue: [{ passed: true }] });
+    const config = {
+      ...defaultSchedulerConfig(),
+      team: {
+        ...defaultSchedulerConfig().team,
+        mode: "solo" as const,
+        max_qa: 0,
+        min_qa: 0,
+        max_reviewers: 0,
+        min_reviewers: 0,
+      },
+    };
+
+    const tick = await implementingTick({
+      run: run({ feature_tip_sha: "tip_solo" }),
+      tasks: [task({ id: "tsk_a", status: "done" })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      qa,
+      config,
+      try_exit: true,
+      routing: { adapters: defaultAdaptersForRouting() },
+      now_ms: 1_000,
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(qa.requests).toHaveLength(1);
+    expect(tick.qa_outcomes[0]?.passed).toBe(true);
+    expect(tick.exited).toBe(true);
+    expect(tick.run.phase).toBe("PrePR");
+    // system path does not hold a qa session slot
+    expect(tick.runtime.sessions.filter((s) => s.role === "qa")).toHaveLength(0);
+  });
+
+  it("solo max_qa=0 without QA port auto-stamps and exits", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const config = {
+      ...defaultSchedulerConfig(),
+      team: {
+        ...defaultSchedulerConfig().team,
+        mode: "solo" as const,
+        max_qa: 0,
+        min_qa: 0,
+      },
+    };
+
+    const tick = await implementingTick({
+      run: run({ feature_tip_sha: "tip_solo2" }),
+      tasks: [task({ id: "tsk_a", status: "done" })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      config,
+      try_exit: true,
+      now_ms: 1_000,
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(tick.qa_outcomes[0]?.passed).toBe(true);
+    expect(tick.run.qa?.passed_at_commit).toBe("tip_solo2");
+    expect(tick.exited).toBe(true);
+  });
 });
 
 describe("replan protocol hooks", () => {

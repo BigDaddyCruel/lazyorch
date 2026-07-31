@@ -119,6 +119,18 @@ describe("PrePR / PROpen", () => {
     const r = runPrOpenPhase(run, { now: () => FIXED });
     expect(r.run.phase).toBe("CILoop");
   });
+
+  it("PROpen rejects missing or non-ready pr_ref", () => {
+    expect(() =>
+      runPrOpenPhase(baseRun({ phase: "PROpen" }), { now: () => FIXED }),
+    ).toThrow(/ready pr_ref/);
+    expect(() =>
+      runPrOpenPhase(
+        baseRun({ phase: "PROpen", pr_ref: { number: 1, state: "draft" } }),
+        { now: () => FIXED },
+      ),
+    ).toThrow(/ready pr_ref/);
+  });
 });
 
 describe("CILoop", () => {
@@ -197,7 +209,7 @@ describe("CILoop", () => {
     expect(tick.run.phase).toBe("Implementing");
     expect(tick.fix_task_ids).toHaveLength(1);
     expect(tick.tasks.some((t) => t.origin === "dynamic")).toBe(true);
-    expect(tick.run.qa?.passed_at_commit).toBeUndefined();
+    expect(tick.run.qa).toBeUndefined(); // invalidateRunQa deletes qa
   });
 });
 
@@ -316,6 +328,55 @@ describe("merge gate", () => {
     expect(r.should_merge).toBe(false);
     expect(r.gate.status).toBe("rejected");
     expect(r.run.phase).toBe("MergeReady");
+  });
+
+  it("auto merge resolves pending merge gate", async () => {
+    const forge = new FakeForgeGithub({
+      pr: { number: 3, state: "ready", url: "u" },
+    });
+    const gate = createMergeGate({
+      run_id: RUN_ID,
+      pr_number: 3,
+      nextId: () => "gate_222222222222222222222222",
+      now: () => FIXED,
+    });
+    const tick = await lifecycleTick({
+      run: baseRun({
+        phase: "MergeReady",
+        pr_ref: { number: 3, state: "ready", url: "u" },
+      }),
+      tasks: [doneTask("a")],
+      forge,
+      merge_gate: "auto",
+      existing_gates: [gate],
+      now: () => FIXED,
+    });
+    expect(tick.merged).toBe(true);
+    expect(tick.gates.some((g) => g.id === gate.id && g.status === "approved")).toBe(
+      true,
+    );
+  });
+
+  it("changes_requested re-enters Implementing with dynamic tasks", async () => {
+    const forge = new FakeForgeGithub({
+      pr: { number: 3, state: "ready" },
+    });
+    const tick = await lifecycleTick({
+      run: baseRun({
+        phase: "MergeReady",
+        pr_ref: { number: 3, state: "ready" },
+        qa: { passed_at_commit: "tip_abc" },
+      }),
+      tasks: [doneTask("a")],
+      forge,
+      changes_requested: { summary: "please fix nits" },
+      nextTaskId: () => "tsk_crcrcrcrcrcrcrcrcrcrcrcr",
+      now: () => FIXED,
+    });
+    expect(tick.run.phase).toBe("Implementing");
+    expect(tick.fix_task_ids).toHaveLength(1);
+    expect(tick.tasks.some((t) => t.origin === "dynamic")).toBe(true);
+    expect(tick.run.qa).toBeUndefined();
   });
 });
 

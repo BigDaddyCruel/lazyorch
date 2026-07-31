@@ -3,8 +3,11 @@
  */
 
 import { generateId } from "@lazyorch/shared";
+import {
+  createDynamicFixTasks,
+  invalidateRunQa,
+} from "../implementing/qa.js";
 import { transitionRunPhase } from "../orchestrator/run-fsm.js";
-import { createDynamicFixTasks } from "../implementing/qa.js";
 import type { Run } from "../types/run.js";
 import type { Task } from "../types/task.js";
 import type { ForgeGithubPort, PollChecksPortResult } from "./ports.js";
@@ -101,7 +104,7 @@ export async function runCiLoopTick(
     });
     nextRun = transitionRunPhase(nextRun, "Implementing", { updated_at: ts });
     // Invalidate QA so re-exit requires re-QA at new tip after fixes
-    nextRun = { ...nextRun, qa: {} };
+    nextRun = invalidateRunQa(nextRun, () => ts);
     return {
       run: nextRun,
       tasks: [...tasks, ...fix_tasks],

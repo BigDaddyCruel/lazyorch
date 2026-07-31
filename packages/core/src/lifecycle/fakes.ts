@@ -67,16 +67,19 @@ export class FakeForgeGithub implements ForgeGithubPort {
       return { pr_ref: { ...this.pr }, action: "undrafted" };
     }
 
-    const number = req.existing_pr_number ?? this.nextNumber++;
+    // Synthesize a new ready PR (real ensureReadyPr would create+markReady).
+    const number =
+      this.pr === undefined && req.existing_pr_number !== undefined
+        ? req.existing_pr_number
+        : this.nextNumber++;
+    if (number >= this.nextNumber) this.nextNumber = number + 1;
     this.pr = {
       number,
       state: "ready",
       url: `https://example.test/pr/${number}`,
-      head_sha: req.head_branch,
+      head_sha: `sha_${number}`,
     };
-    const action =
-      req.existing_pr_number !== undefined ? "undrafted" : "created";
-    return { pr_ref: { ...this.pr }, action };
+    return { pr_ref: { ...this.pr }, action: "created" };
   }
 
   async pollChecks(req: PollChecksPortRequest): Promise<PollChecksPortResult> {

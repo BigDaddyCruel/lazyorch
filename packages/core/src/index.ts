@@ -478,6 +478,8 @@ export {
   applyMergeGateDecision,
   applyMerged,
   shouldAutoMerge,
+  resolvePendingMergeGates,
+  applyChangesRequested,
   lifecycleTick,
   type MergeMethod,
   type EnsureReadyPrPortRequest,
@@ -494,6 +496,8 @@ export {
   type CreateMergeGateOpts,
   type MergeGateDecision,
   type ApplyMergeGateDecisionResult,
+  type ApplyChangesRequestedOpts,
+  type ApplyChangesRequestedResult,
   type LifecycleTickParams,
   type LifecycleTickResult,
 } from "./lifecycle/index.js";
