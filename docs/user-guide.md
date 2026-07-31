@@ -393,9 +393,50 @@ can slow agent runs and git worktree operations.
 - Prefer absolute `binary` paths in config when CLIs are installed outside PATH (npx shims, version managers).
 - Cancel uses process-tree kill (`taskkill /T /F /PID` on Windows).
 
-### Shell adapter
+### Shell adapter allowlist
 
-Deterministic tasks use the shell adapter with an **allowlist**. Do not put unrestricted interactive shells on the allowlist for unattended runs.
+Deterministic tasks use the shell adapter with a **basename allowlist** and optional **deny_patterns**. This is a safety gate, **not a full OS sandbox**: once a binary is allowed, most argv forms are permitted unless a deny pattern matches.
+
+**Defaults** (also in config schema / `DEFAULT_SHELL_ALLOWLIST`):
+
+```yaml
+shell:
+  allowed_commands:
+    - git
+    - npm
+    - pnpm
+    - node
+    - npx
+    - vitest
+    - tsc
+    - eslint
+  deny_patterns:
+    - "rm -rf /"
+    - "git push --force"
+    - "git push -f"
+```
+
+**Private-beta hardening tips:**
+
+1. Do **not** add `bash`, `sh`, `cmd`, `powershell`, or `pwsh` for unattended runs.
+2. `gh` is intentionally **absent** — GitHub network ops are forge-owned (no tokens in agent shell env by default).
+3. Tighten with deny patterns when needed, e.g. block `node -e` one-liners in CI:
+
+   ```yaml
+   shell:
+     deny_patterns:
+       - "rm -rf /"
+       - "git push --force"
+       - "git push -f"
+       - "node\\s+-e"
+       - "npm\\s+exec"
+   ```
+
+4. Prefer scripted acceptance (`pnpm test`, `tsc -b`) over free-form shell.
+
+Session env is **scrubbed** before spawn (no `GH_TOKEN` / `LAZYORCH_*` / AWS/DB creds / API keys). Prompts run through token redaction. `lazyorch logs` and the GUI Logs page redact common token shapes on **display** only (JSONL on disk and SSE wire frames are not rewritten).
+
+Installer / Windows Defender / npm global notes: [`release.md`](./release.md).
 
 ---
 
@@ -416,6 +457,7 @@ lazyorch logs --run <run_id> --limit 100
 ## Further reading
 
 - Design doc: [`design-lazyorch.md`](./design-lazyorch.md)
-- OpenAPI placeholder: [`openapi.yaml`](./openapi.yaml)
+- Release / install (private beta): [`release.md`](./release.md)
+- OpenAPI (daemon HTTP freeze): [`openapi.yaml`](./openapi.yaml)
 - E2E fixtures: [`../tests/fixtures/`](../tests/fixtures/)
 - E2E smoke tests: [`../tests/e2e/`](../tests/e2e/)

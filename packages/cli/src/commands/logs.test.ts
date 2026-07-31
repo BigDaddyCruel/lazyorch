@@ -5,6 +5,8 @@ import { describe, expect, it, afterEach } from "vitest";
 import type { EventEnvelope } from "@lazyorch/daemon";
 import {
   applyEventLimit,
+  formatLogLine,
+  formatLogsJson,
   readEventJsonlReadonly,
   runLogs,
 } from "./logs.js";
@@ -147,5 +149,60 @@ describe("applyEventLimit", () => {
     expect(applyEventLimit(sample, 0)).toEqual([]);
     expect(applyEventLimit(sample, 1)).toHaveLength(1);
     expect(applyEventLimit(sample, undefined)).toHaveLength(2);
+  });
+});
+
+describe("logs display redaction", () => {
+  it("formatLogsJson redacts token-shaped values without mutating events", () => {
+    const payload = {
+      events: [
+        {
+          type: "log.line",
+          msg: "auth ghp_abcdefghijklmnopqrstuvwxyz12",
+        },
+      ],
+    };
+    const out = formatLogsJson(payload, false);
+    expect(out).not.toMatch(/ghp_[A-Za-z0-9_]+/);
+    expect(out).toContain("[REDACTED]");
+    // source object unchanged
+    expect(payload.events[0]!.msg).toContain("ghp_");
+  });
+
+  it("formatLogLine redacts follow-mode lines", () => {
+    const line = formatLogLine(
+      JSON.stringify({
+        type: "log.line",
+        msg: "key sk-abcdefghijklmnopqrstuvwxyz",
+      }),
+    );
+    expect(line).not.toMatch(/sk-[A-Za-z0-9_-]{20,}/);
+    expect(line).toContain("[REDACTED]");
+    expect(line.endsWith("\n")).toBe(true);
+  });
+
+  it("runLogs stdout redacts secrets in event payloads", async () => {
+    const streams = capture();
+    const secretEvents: EventEnvelope[] = [
+      {
+        schema_version: 1,
+        ts: "2026-01-01T00:00:00.000Z",
+        project_id: "proj_x",
+        run_id: "run_logs1aaaaaaaaaaaaaaaaaaaa",
+        type: "log.line",
+        payload: { line: "token ghp_abcdefghijklmnopqrstuvwxyz12" },
+      },
+    ];
+    const res = await runLogs({
+      resolvePath: () => "/tmp/events.jsonl",
+      readEvents: async () => secretEvents,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(res.exitCode).toBe(EXIT.OK);
+    expect(streams.stdout.text).not.toMatch(/ghp_[A-Za-z0-9_]+/);
+    expect(streams.stdout.text).toContain("[REDACTED]");
+    // in-memory events remain unredacted (durable truth for callers)
+    expect(JSON.stringify(res.events)).toContain("ghp_");
   });
 });

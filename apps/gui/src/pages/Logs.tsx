@@ -1,4 +1,5 @@
 import { formatTs } from "../lib/format.js";
+import { scrubJsonForDisplay } from "../lib/redact.js";
 import { useAppState } from "../state/AppState.js";
 
 export function LogsPage() {
@@ -44,7 +45,9 @@ export function LogsPage() {
                 <span className="muted">{formatTs(e.ts)}</span>{" "}
                 <span className="tag info">{e.type}</span>{" "}
                 {e.run_id && <span className="mono">{e.run_id}</span>}{" "}
-                {e.payload && <span className="muted">{JSON.stringify(e.payload)}</span>}
+                {e.payload && (
+                  <span className="muted">{scrubJsonForDisplay(e.payload)}</span>
+                )}
               </div>
             ))}
           </div>

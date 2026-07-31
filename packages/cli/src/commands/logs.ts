@@ -3,12 +3,17 @@
  *
  * **Read-only:** never mutates event files (torn last lines are skipped in
  * memory only). Daemon recovery may use mutate-on-read; CLI must not.
+ *
+ * **Display redaction:** stdout is passed through {@link scrubText} so common
+ * token prefixes (ghp_, sk-, …) are not printed to the terminal. Durable JSONL
+ * on disk is left unchanged.
  */
+import { scrubText } from "@lazyorch/adapters";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { eventJsonlPath, type EventEnvelope } from "@lazyorch/daemon";
 import { EXIT } from "../exit-codes.js";
-import { writeJson, writeLine } from "../util.js";
+
 
 export interface LogsOptions {
   run?: string;
@@ -44,6 +49,19 @@ export interface LogsResult {
   events: EventEnvelope[];
   path: string;
   message?: string;
+}
+
+/** Serialize for terminal display with best-effort secret redaction. */
+export function formatLogsJson(value: unknown, pretty: boolean): string {
+  const raw = pretty
+    ? `${JSON.stringify(value, null, 2)}\n`
+    : `${JSON.stringify(value)}\n`;
+  return scrubText(raw);
+}
+
+/** Single JSONL/event line for follow mode (redacted). */
+export function formatLogLine(line: string): string {
+  return scrubText(line.endsWith("\n") ? line : `${line}\n`);
 }
 
 /**
@@ -131,24 +149,26 @@ export async function runLogs(options: LogsOptions = {}): Promise<LogsResult> {
   try {
     // --limit 0: empty result without reading when possible (still ok to read)
     if (options.limit === 0) {
-      writeJson(
-        stdout,
-        { path, run_id: runId ?? null, count: 0, events: [] },
-        pretty,
+      stdout.write(
+        formatLogsJson(
+          { path, run_id: runId ?? null, count: 0, events: [] },
+          pretty,
+        ),
       );
       return { exitCode: EXIT.OK, events: [], path };
     }
 
     const events = applyEventLimit(await reader(path), options.limit);
-    writeJson(
-      stdout,
-      {
-        path,
-        run_id: runId ?? null,
-        count: events.length,
-        events,
-      },
-      pretty,
+    stdout.write(
+      formatLogsJson(
+        {
+          path,
+          run_id: runId ?? null,
+          count: events.length,
+          events,
+        },
+        pretty,
+      ),
     );
     return { exitCode: EXIT.OK, events, path };
   } catch (err) {
@@ -179,7 +199,7 @@ async function followLogs(opts: {
   try {
     const events = await opts.reader(opts.path);
     for (const ev of events) {
-      writeLine(opts.stdout, JSON.stringify(ev));
+      opts.stdout.write(formatLogLine(JSON.stringify(ev)));
       all.push(ev);
       seen += 1;
       if (opts.limit !== undefined && seen >= opts.limit) {
@@ -201,7 +221,7 @@ async function followLogs(opts: {
       const events = await opts.reader(opts.path);
       if (events.length > seen) {
         for (const ev of events.slice(seen)) {
-          writeLine(opts.stdout, JSON.stringify(ev));
+          opts.stdout.write(formatLogLine(JSON.stringify(ev)));
           all.push(ev);
           seen += 1;
           if (opts.limit !== undefined && seen >= opts.limit) {
