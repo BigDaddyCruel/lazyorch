@@ -5,16 +5,14 @@
  * 1. Prefer binding an idle pool worker (reuse); mint only when needed
  * 2. Path-scope locks (forge port; sorted atomic acquire)
  * 3. Worktree hooks (interface; no real git in unit tests)
- * 4. Model router at session start (KD-42)
- * 5. Task FSM transition with assignee / worktree / branch
+ * 4. Role-template matching (role_affinity ∩ worker_templates) + preferred_adapters
+ * 5. Model router at session start (KD-42)
+ * 6. Task FSM transition with assignee / worktree / branch
  *
  * Caps (per assignment + caller max_assign):
  * - free_for_workers (slot ceiling + lead reserve)
  * - pool_workers ≤ max_workers when minting (idle reuse free)
  * - desired / budget via max_assign from schedulerTick
- *
- * Role-template matching (role_affinity ∩ worker_templates) is deferred
- * to PR-13 team manager.
  */
 
 import { generateId } from "@lazyorch/shared";
@@ -27,6 +25,12 @@ import {
   type RouteResult,
 } from "../models/index.js";
 import { transitionTaskStatus } from "../orchestrator/task-fsm.js";
+import {
+  FALLBACK_WORKER_TEMPLATE,
+  matchWorkerTemplate,
+  type MatchWorkerTemplateResult,
+  type RoleTemplate,
+} from "../team/index.js";
 import type { RunPhase } from "../types/run.js";
 import type { Task } from "../types/task.js";
 import {
@@ -72,6 +76,13 @@ export interface AssignReadyOptions {
   routing?: AssignRoutingOptions;
   metrics?: SchedulerMetrics;
   skip_scope_lock_task_ids?: ReadonlySet<string>;
+  /**
+   * team.worker_templates for role-template matching (PR-13).
+   * Default: fullstack-dev, backend-dev, frontend-dev.
+   */
+  worker_templates?: readonly string[];
+  /** Optional extra / override role templates for matching. */
+  role_templates?: readonly RoleTemplate[];
 }
 
 export interface AssignRoutingOptions {
@@ -85,6 +96,12 @@ export interface AssignRoutingOptions {
   budget_pressure?: boolean;
   routeFn?: (input: RouteInput) => RouteResult;
 }
+
+const DEFAULT_WORKER_TEMPLATES = [
+  FALLBACK_WORKER_TEMPLATE,
+  "backend-dev",
+  "frontend-dev",
+] as const;
 
 function taskPin(task: Task): ModelPin | undefined {
   const pin: ModelPin = {};
@@ -108,6 +125,7 @@ function buildRouteInput(
   task: Task,
   lengths: ReadonlyMap<string, number>,
   routing: AssignRoutingOptions | undefined,
+  preferredFromTemplate?: readonly string[],
 ): RouteInput {
   const pin = taskPin(task);
   const input: RouteInput = {
@@ -137,8 +155,14 @@ function buildRouteInput(
   if (routing?.preference_order) {
     input.preference_order = routing.preference_order;
   }
-  if (routing?.preferred_adapters) {
-    input.preferred_adapters = routing.preferred_adapters;
+  // Explicit routing preferred_adapters win; else template preferred_adapters.
+  const preferred =
+    routing?.preferred_adapters ??
+    (preferredFromTemplate && preferredFromTemplate.length > 0
+      ? [...preferredFromTemplate]
+      : undefined);
+  if (preferred) {
+    input.preferred_adapters = preferred;
   }
   if (routing?.budget_pressure !== undefined) {
     input.budget_pressure = routing.budget_pressure;
@@ -153,15 +177,82 @@ function routeForTask(
   task: Task,
   lengths: ReadonlyMap<string, number>,
   routing: AssignRoutingOptions | undefined,
+  preferredFromTemplate?: readonly string[],
 ): RouteResult {
-  const input = buildRouteInput(task, lengths, routing);
+  const input = buildRouteInput(
+    task,
+    lengths,
+    routing,
+    preferredFromTemplate,
+  );
   if (routing?.routeFn) return routing.routeFn(input);
   return routeModel(input);
 }
 
-/** First idle, non-draining worker with no task (oldest last_activity first). */
+/** Match worker template for task (PR-13 role-template matching). */
+export function matchTemplateForTask(
+  task: Task,
+  workerTemplates?: readonly string[],
+  roleTemplates?: readonly RoleTemplate[],
+): MatchWorkerTemplateResult {
+  return matchWorkerTemplate(
+    task.role_affinity,
+    workerTemplates ?? DEFAULT_WORKER_TEMPLATES,
+    roleTemplates,
+  );
+}
+
+function normalizeLabel(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+/** Generic tags that should not alone decide idle-worker affinity. */
+const GENERIC_IDLE_LABELS = new Set(["worker", "fullstack", "fullstack-dev"]);
+
+/** Intersection of session labels with preferred template labels (normalized). */
+export function sessionLabelIntersection(
+  sessionLabels: readonly string[] | undefined,
+  templateLabels: readonly string[],
+): string[] {
+  if (!sessionLabels || sessionLabels.length === 0) return [];
+  if (templateLabels.length === 0) return [];
+  const want = new Set(templateLabels.map(normalizeLabel));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const l of sessionLabels) {
+    const n = normalizeLabel(l);
+    if (!n || seen.has(n) || !want.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
+
+/** True if session labels intersect preferred template labels (case-insensitive). */
+export function sessionLabelsMatchTemplate(
+  sessionLabels: readonly string[] | undefined,
+  templateLabels: readonly string[],
+): boolean {
+  return sessionLabelIntersection(sessionLabels, templateLabels).length > 0;
+}
+
+function specializedIdleScore(intersection: readonly string[]): number {
+  let n = 0;
+  for (const t of intersection) {
+    if (!GENERIC_IDLE_LABELS.has(t)) n += 1;
+  }
+  return n;
+}
+
+/**
+ * First idle, non-draining worker with no task (oldest last_activity first).
+ * When `preferred_labels` is set, prefer idle workers whose labels intersect
+ * those tags with **specialized** overlap first (backend/frontend over generic
+ * `worker`); fall back to any label match, then any idle.
+ */
 export function pickIdleWorker(
   sessions: readonly SchedulerSession[],
+  preferred_labels?: readonly string[],
 ): SchedulerSession | undefined {
   const idles = sessions.filter(
     (s) =>
@@ -170,7 +261,8 @@ export function pickIdleWorker(
       s.task_id === undefined,
   );
   if (idles.length === 0) return undefined;
-  idles.sort((a, b) => {
+
+  const byActivity = (a: SchedulerSession, b: SchedulerSession): number => {
     if (a.last_activity_ms !== b.last_activity_ms) {
       return a.last_activity_ms - b.last_activity_ms;
     }
@@ -179,7 +271,33 @@ export function pickIdleWorker(
       : a.run_handle > b.run_handle
         ? 1
         : 0;
-  });
+  };
+
+  if (preferred_labels && preferred_labels.length > 0) {
+    const scored = idles.map((s) => {
+      const inter = sessionLabelIntersection(s.labels, preferred_labels);
+      return {
+        s,
+        specialized: specializedIdleScore(inter),
+        any: inter.length,
+      };
+    });
+    const withSpecialized = scored.filter((x) => x.specialized > 0);
+    if (withSpecialized.length > 0) {
+      withSpecialized.sort((a, b) => {
+        if (b.specialized !== a.specialized) return b.specialized - a.specialized;
+        return byActivity(a.s, b.s);
+      });
+      return withSpecialized[0]!.s;
+    }
+    const withAny = scored.filter((x) => x.any > 0);
+    if (withAny.length > 0) {
+      withAny.sort((a, b) => byActivity(a.s, b.s));
+      return withAny[0]!.s;
+    }
+  }
+
+  idles.sort(byActivity);
   return idles[0];
 }
 
@@ -290,6 +408,13 @@ async function assignLoop(
   for (const task of ready) {
     if (assignCount >= maxAssign) break;
 
+    const templateMatch = matchTemplateForTask(
+      task,
+      options.worker_templates,
+      options.role_templates,
+    );
+    const preferredLabels = templateMatch.template.labels;
+
     const usage = computeSlotUsage(liveSessions);
     const free = freeForWorkers({
       max_concurrent_agents: options.limits.max_concurrent_agents,
@@ -298,7 +423,7 @@ async function assignLoop(
       lead_session_active: usage.active_lead > 0,
       lead_reservation_needed: phaseNeedsLeadReservation(options.phase),
     });
-    const idle = pickIdleWorker(liveSessions);
+    const idle = pickIdleWorker(liveSessions, preferredLabels);
     const reuseIdle = idle !== undefined;
 
     if (
@@ -410,8 +535,13 @@ async function assignLoop(
     let reused = false;
 
     try {
-      route = routeForTask(task, lengths, options.routing);
-      const idleNow = pickIdleWorker(liveSessions);
+      route = routeForTask(
+        task,
+        lengths,
+        options.routing,
+        templateMatch.template.preferred_adapters,
+      );
+      const idleNow = pickIdleWorker(liveSessions, preferredLabels);
       if (idleNow) {
         agentId = idleNow.agent_id;
         runHandle = idleNow.run_handle;
@@ -472,6 +602,7 @@ async function assignLoop(
       session_kind: route.session_kind,
       run_handle: runHandle,
       reused_idle: reused,
+      worker_template_id: templateMatch.template_id,
     };
     if (route.effort !== undefined) session_plan.effort = route.effort;
     if (route.score !== undefined) {
@@ -487,6 +618,7 @@ async function assignLoop(
     assigned.push(result);
     assignCount += 1;
 
+    const templateLabels = [...templateMatch.template.labels];
     if (reused) {
       const idx = liveSessions.findIndex((s) => s.run_handle === runHandle);
       if (idx >= 0) {
@@ -498,6 +630,7 @@ async function assignLoop(
           model: route.model,
           model_tier: route.tier,
           last_activity_ms: now,
+          labels: templateLabels,
         };
       }
     } else {
@@ -511,6 +644,7 @@ async function assignLoop(
         model: route.model,
         model_tier: route.tier,
         last_activity_ms: now,
+        labels: templateLabels,
       });
     }
   }
@@ -577,6 +711,13 @@ function assignReadyTasksBlocking(
   for (const task of ready) {
     if (assignCount >= maxAssign) break;
 
+    const templateMatch = matchTemplateForTask(
+      task,
+      options.worker_templates,
+      options.role_templates,
+    );
+    const preferredLabels = templateMatch.template.labels;
+
     const usage = computeSlotUsage(liveSessions);
     const free = freeForWorkers({
       max_concurrent_agents: options.limits.max_concurrent_agents,
@@ -585,7 +726,7 @@ function assignReadyTasksBlocking(
       lead_session_active: usage.active_lead > 0,
       lead_reservation_needed: phaseNeedsLeadReservation(options.phase),
     });
-    const idle = pickIdleWorker(liveSessions);
+    const idle = pickIdleWorker(liveSessions, preferredLabels);
     const reuseIdle = idle !== undefined;
 
     if (
@@ -695,8 +836,13 @@ function assignReadyTasksBlocking(
     let reused = false;
 
     try {
-      route = routeForTask(task, lengths, options.routing);
-      const idleNow = pickIdleWorker(liveSessions);
+      route = routeForTask(
+        task,
+        lengths,
+        options.routing,
+        templateMatch.template.preferred_adapters,
+      );
+      const idleNow = pickIdleWorker(liveSessions, preferredLabels);
       if (idleNow) {
         agentId = idleNow.agent_id;
         runHandle = idleNow.run_handle;
@@ -756,6 +902,7 @@ function assignReadyTasksBlocking(
       session_kind: route.session_kind,
       run_handle: runHandle,
       reused_idle: reused,
+      worker_template_id: templateMatch.template_id,
     };
     if (route.effort !== undefined) session_plan.effort = route.effort;
     if (route.score !== undefined) {
@@ -771,6 +918,7 @@ function assignReadyTasksBlocking(
     assigned.push(result);
     assignCount += 1;
 
+    const templateLabels = [...templateMatch.template.labels];
     if (reused) {
       const idx = liveSessions.findIndex((s) => s.run_handle === runHandle);
       if (idx >= 0) {
@@ -782,6 +930,7 @@ function assignReadyTasksBlocking(
           model: route.model,
           model_tier: route.tier,
           last_activity_ms: now,
+          labels: templateLabels,
         };
       }
     } else {
@@ -795,6 +944,7 @@ function assignReadyTasksBlocking(
         model: route.model,
         model_tier: route.tier,
         last_activity_ms: now,
+        labels: templateLabels,
       });
     }
   }

@@ -1,7 +1,7 @@
 /**
  * Scheduler tick: elasticity + assign ready tasks (+ router at assign).
  *
- * Caller contract (normative, Issue 4):
+ * Caller contract (normative):
  * 1. Apply `assign.assigned` session plans first (mint or idle-reuse).
  * 2. `scale.spawn_count` is **only** additional idle pre-warm to reach
  *    `desired` after assign (e.g. min_workers floor with no ready work).
@@ -9,10 +9,13 @@
  * 3. Apply `scale.drain_handles` to mark idle workers draining.
  *
  * Assign respects `desired` and `budget_exhausted` via max_assign.
- * Role-template matching deferred to PR-13 team manager.
+ * Role-template matching (PR-13): `team.worker_templates` → matchWorkerTemplate
+ * at assign; stamps `session_plan.worker_template_id` and session labels.
+ * Idle reuse prefers workers whose labels intersect the matched template.
  */
 
 import type { ElasticityConfig, SchedulingConfig } from "@lazyorch/shared";
+import { getRoleTemplate } from "../team/role-templates.js";
 import type { RunPhase } from "../types/run.js";
 import type { Task } from "../types/task.js";
 import {
@@ -426,6 +429,10 @@ function buildAssignOptions(
     opts.skip_scope_lock_task_ids = input.skip_scope_lock_task_ids;
   }
   if (input.max_assign !== undefined) opts.max_assign = input.max_assign;
+  // PR-13: role-template matching uses team.worker_templates
+  if (input.config.team.worker_templates?.length) {
+    opts.worker_templates = input.config.team.worker_templates;
+  }
 
   opts.nextAgentId = () => {
     agentSeq.value += 1;
@@ -446,11 +453,17 @@ export function applyAssignToSessions(
   let next = sessions.map((s) => ({ ...s }));
   for (const a of assign.assigned) {
     const plan = a.session_plan;
+    const tplLabels =
+      plan.worker_template_id !== undefined
+        ? getRoleTemplate(plan.worker_template_id)?.labels
+        : undefined;
+
     if (plan.reused_idle) {
       const idx = next.findIndex((s) => s.run_handle === plan.run_handle);
       if (idx >= 0) {
-        next[idx] = {
-          ...next[idx]!,
+        const prev = next[idx]!;
+        const updated: SchedulerSession = {
+          ...prev,
           state: "starting",
           task_id: a.task.id,
           adapter_id: plan.adapter_id,
@@ -458,22 +471,24 @@ export function applyAssignToSessions(
           model_tier: plan.model_tier,
           last_activity_ms: now,
         };
+        if (tplLabels) updated.labels = [...tplLabels];
+        else if (prev.labels) updated.labels = [...prev.labels];
+        next[idx] = updated;
       }
     } else {
-      next = [
-        ...next,
-        {
-          run_handle: plan.run_handle,
-          agent_id: plan.agent_id,
-          role: "worker",
-          task_id: a.task.id,
-          state: "starting",
-          adapter_id: plan.adapter_id,
-          model: plan.model,
-          model_tier: plan.model_tier,
-          last_activity_ms: now,
-        },
-      ];
+      const minted: SchedulerSession = {
+        run_handle: plan.run_handle,
+        agent_id: plan.agent_id,
+        role: "worker",
+        task_id: a.task.id,
+        state: "starting",
+        adapter_id: plan.adapter_id,
+        model: plan.model,
+        model_tier: plan.model_tier,
+        last_activity_ms: now,
+      };
+      if (tplLabels) minted.labels = [...tplLabels];
+      next = [...next, minted];
     }
   }
   return next;
