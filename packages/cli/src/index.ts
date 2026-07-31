@@ -7,6 +7,14 @@ import { runInit } from "./commands/init.js";
 import { runDoctor } from "./commands/doctor.js";
 import { runContext, type ContextSubcommand } from "./commands/context.js";
 import { runAdapter, type AdapterSubcommand } from "./commands/adapter.js";
+import { runStart } from "./commands/start.js";
+import { runStatus } from "./commands/status.js";
+import { runRunCommand, type RunSubcommand } from "./commands/run.js";
+import { runGate, type GateSubcommand } from "./commands/gate.js";
+import { runModels, type ModelsSubcommand } from "./commands/models.js";
+import { runLogs } from "./commands/logs.js";
+import { runServe } from "./commands/serve.js";
+import { EXIT } from "./exit-codes.js";
 
 export const PACKAGE_NAME = "@lazyorch/cli" as const;
 
@@ -14,6 +22,16 @@ export function cliPlaceholder(): string {
   return PACKAGE_NAME;
 }
 
+export { EXIT } from "./exit-codes.js";
+export {
+  RUN_PIN_CONTEXT_KEY,
+  buildRunPin,
+  runPinFromContext,
+} from "./run-pin.js";
+export {
+  readEventJsonlReadonly,
+  applyEventLimit,
+} from "./commands/logs.js";
 export { runInit, type InitOptions, type InitResult } from "./commands/init.js";
 export {
   runDoctor,
@@ -33,6 +51,45 @@ export {
   type AdapterCommandResult,
   type AdapterSubcommand,
 } from "./commands/adapter.js";
+export {
+  runStart,
+  type StartOptions,
+  type StartResult,
+} from "./commands/start.js";
+export {
+  runStatus,
+  type StatusOptions,
+  type StatusResult,
+} from "./commands/status.js";
+export {
+  runRunCommand,
+  type RunCommandOptions,
+  type RunCommandResult,
+  type RunSubcommand,
+} from "./commands/run.js";
+export {
+  runGate,
+  allowedDecisions,
+  type GateCommandOptions,
+  type GateCommandResult,
+  type GateSubcommand,
+} from "./commands/gate.js";
+export {
+  runModels,
+  type ModelsCommandOptions,
+  type ModelsCommandResult,
+  type ModelsSubcommand,
+} from "./commands/models.js";
+export {
+  runLogs,
+  type LogsOptions,
+  type LogsResult,
+} from "./commands/logs.js";
+export {
+  runServe,
+  type ServeCommandOptions,
+  type ServeCommandResult,
+} from "./commands/serve.js";
 
 const HELP = `lazyorch — AI agent orchestration CLI
 
@@ -40,11 +97,25 @@ Usage:
   lazyorch <command> [options]
 
 Commands:
-  init     Create .lazyorch/config.yml and project.json skeleton
-  doctor   Validate config, slot packing, and adapter binaries
-  adapter  Adapter registry (list|register|test)
-  context  Shared run context KV (list|get|set|delete)
-  help     Show this help
+  init      Create .lazyorch/config.yml and project.json skeleton
+  doctor    Validate config, slot packing, and adapter binaries
+  serve     Ensure user-level daemon is running
+  start     Create a run from an idea
+  status    Show runs + pending gates [run_id]
+  run       Run list|show (alias: runs)
+  gate      Gate list|approve|reject
+  models    Model router dry-run (route)
+  adapter   Adapter registry (list|register|test)
+  context   Shared run context KV (list|get|set|delete)
+  logs      Read events JSONL (read-only)
+  help      Show this help
+
+Exit codes:
+  0 ok  1 error  2 usage  3 gate required  4 adapter missing
+  5 plan not consensus/validators  6 multi-PR not implemented
+
+Observational commands (status, run show, gate list) exit 0 by default when
+gates are pending. Pass --check or --gate-exit to exit 3 for CI.
 
 init options:
   --name <n>     Project display name (default: directory name)
@@ -55,6 +126,41 @@ doctor options:
   --repo <path>  Repository root (default: cwd)
   --ci           Treat as CI/headless (timeout_action default fail when unset)
   --no-ci        Force interactive semantics (overrides CI/GITHUB_ACTIONS env)
+
+serve:
+  lazyorch serve [--port n] [--host addr] [--home dir] [--background] [--once]
+
+start:
+  lazyorch start "<idea>" [-f idea.md] [--budget-usd n]
+    [--tier nano|small|medium|large|xlarge] [--model m] [--adapter a]
+    [--repo path]
+  Pins are stored as ModelPin under context key model_pin/run (for routeModel).
+  --yes is not implemented (rejected with usage).
+
+status:
+  lazyorch status [run_id] [--repo path] [--gate-exit|--check]
+
+run:
+  lazyorch run list [--repo path]
+  lazyorch run show <run_id> [--repo path] [--check|--gate-exit]
+
+gate:
+  lazyorch gate list [--run id] [--all] [--check] [--repo path]
+  lazyorch gate approve <gate_id> [--run id] [--decision action]
+  lazyorch gate reject <gate_id> [--run id] [--decision action]
+  Multi-outcome gates require --decision:
+    plan_approve reject: cancel|revise
+    plan_dispute: accept_wontfix|force_addressed|abort
+    plan_max_rounds: force_approve|edit|abort
+
+models:
+  lazyorch models route [--role worker] [--task id] [--run id]
+    [--signals json] [--tier t] [--model m] [--adapter a] [--budget-pressure]
+  --run loads context model_pin/run as run_pin; CLI flags override.
+
+logs:
+  lazyorch logs [--run id] [--follow] [--limit n] [--repo path]
+  --limit 0 prints nothing. Reader never mutates event JSONL files.
 
 adapter usage:
   lazyorch adapter list [--repo <path>] [--enabled] [--probe]
@@ -78,6 +184,9 @@ context usage:
 
 const CONTEXT_ACTIONS = new Set<string>(["list", "get", "set", "delete"]);
 const ADAPTER_ACTIONS = new Set<string>(["list", "register", "test"]);
+const GATE_ACTIONS = new Set<string>(["list", "approve", "reject"]);
+const RUN_ACTIONS = new Set<string>(["list", "show"]);
+const MODELS_ACTIONS = new Set<string>(["route"]);
 
 async function main(argv: string[]): Promise<number> {
   let values: Record<string, unknown>;
@@ -102,6 +211,30 @@ async function main(argv: string[]): Promise<number> {
         force: { type: "boolean", default: false },
         ci: { type: "boolean", default: false },
         "no-ci": { type: "boolean", default: false },
+        // start / models / serve
+        f: { type: "string", short: "f" },
+        "budget-usd": { type: "string" },
+        yes: { type: "boolean", default: false },
+        tier: { type: "string" },
+        model: { type: "string" },
+        adapter: { type: "string" },
+        role: { type: "string" },
+        task: { type: "string" },
+        signals: { type: "string" },
+        "budget-pressure": { type: "boolean", default: false },
+        // gate / observational exit-3 opt-in
+        all: { type: "boolean", default: false },
+        check: { type: "boolean", default: false },
+        decision: { type: "string" },
+        "gate-exit": { type: "boolean", default: false },
+        // logs / serve
+        follow: { type: "boolean", default: false },
+        limit: { type: "string" },
+        port: { type: "string" },
+        host: { type: "string" },
+        home: { type: "string" },
+        background: { type: "boolean", default: false },
+        once: { type: "boolean", default: false },
         help: { type: "boolean", default: false, short: "h" },
         version: { type: "boolean", default: false, short: "v" },
       },
@@ -113,24 +246,28 @@ async function main(argv: string[]): Promise<number> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`error: ${msg}\n\n${HELP}`);
-    return 2;
+    return EXIT.USAGE;
   }
 
   if (values.help === true || positionals[0] === "help") {
     process.stdout.write(HELP);
-    return 0;
+    return EXIT.OK;
   }
 
   if (values.version === true) {
     process.stdout.write("lazyorch 0.0.0\n");
-    return 0;
+    return EXIT.OK;
   }
 
   const command = positionals[0];
   if (!command) {
     process.stdout.write(HELP);
-    return 0;
+    return EXIT.OK;
   }
+
+  // Unified opt-in for observational exit 3
+  const gateCheck =
+    values.check === true || values["gate-exit"] === true;
 
   switch (command) {
     case "init": {
@@ -140,12 +277,11 @@ async function main(argv: string[]): Promise<number> {
       if (typeof values.name === "string") initOpts.name = values.name;
       if (typeof values.repo === "string") initOpts.repo = values.repo;
       await runInit(initOpts);
-      return 0;
+      return EXIT.OK;
     }
     case "doctor": {
       const doctorOpts: Parameters<typeof runDoctor>[0] = {};
       if (typeof values.repo === "string") doctorOpts.repo = values.repo;
-      // --no-ci wins over --ci and env auto-detect
       if (values["no-ci"] === true) {
         doctorOpts.ci = false;
       } else if (values.ci === true) {
@@ -154,13 +290,151 @@ async function main(argv: string[]): Promise<number> {
       const result = await runDoctor(doctorOpts);
       return result.exitCode;
     }
+    case "serve": {
+      const serveOpts: Parameters<typeof runServe>[0] = {
+        background: values.background === true,
+        once: values.once === true || values.background === true,
+      };
+      if (typeof values.port === "string") {
+        const n = Number(values.port);
+        if (!Number.isInteger(n) || n < 0) {
+          process.stderr.write("error: --port must be a non-negative integer\n");
+          return EXIT.USAGE;
+        }
+        serveOpts.port = n;
+      }
+      if (typeof values.host === "string") serveOpts.host = values.host;
+      if (typeof values.home === "string") serveOpts.home = values.home;
+      const result = await runServe(serveOpts);
+      return result.exitCode;
+    }
+    case "start": {
+      const startOpts: Parameters<typeof runStart>[0] = {
+        yes: values.yes === true,
+      };
+      if (typeof positionals[1] === "string") startOpts.idea = positionals[1];
+      if (typeof values.f === "string") startOpts.ideaFile = values.f;
+      if (typeof values.repo === "string") startOpts.repo = values.repo;
+      if (typeof values.tier === "string") startOpts.tier = values.tier;
+      if (typeof values.model === "string") startOpts.model = values.model;
+      if (typeof values.adapter === "string") startOpts.adapter = values.adapter;
+      if (typeof values["budget-usd"] === "string") {
+        const n = Number(values["budget-usd"]);
+        if (!Number.isFinite(n) || n < 0) {
+          process.stderr.write("error: --budget-usd must be a non-negative number\n");
+          return EXIT.USAGE;
+        }
+        startOpts.budgetUsd = n;
+      }
+      const result = await runStart(startOpts);
+      return result.exitCode;
+    }
+    case "status": {
+      const statusOpts: Parameters<typeof runStatus>[0] = {};
+      if (typeof positionals[1] === "string") statusOpts.runId = positionals[1];
+      if (typeof values.repo === "string") statusOpts.repo = values.repo;
+      if (gateCheck) statusOpts.gateExit = true;
+      const result = await runStatus(statusOpts);
+      return result.exitCode;
+    }
+    case "run":
+    case "runs": {
+      const actionRaw = positionals[1];
+      if (!actionRaw || !RUN_ACTIONS.has(actionRaw)) {
+        process.stderr.write(
+          `error: run requires list|show\n\n${HELP}`,
+        );
+        return EXIT.USAGE;
+      }
+      const runOpts: Parameters<typeof runRunCommand>[0] = {
+        action: actionRaw as RunSubcommand,
+      };
+      if (typeof values.repo === "string") runOpts.repo = values.repo;
+      if (gateCheck) runOpts.check = true;
+      if (actionRaw === "show") {
+        if (typeof positionals[2] === "string") runOpts.runId = positionals[2];
+        else if (typeof values.run === "string") runOpts.runId = values.run;
+      }
+      const result = await runRunCommand(runOpts);
+      return result.exitCode;
+    }
+    case "gate": {
+      const actionRaw = positionals[1];
+      if (!actionRaw || !GATE_ACTIONS.has(actionRaw)) {
+        process.stderr.write(
+          `error: gate requires list|approve|reject\n\n${HELP}`,
+        );
+        return EXIT.USAGE;
+      }
+      const gateOpts: Parameters<typeof runGate>[0] = {
+        action: actionRaw as GateSubcommand,
+      };
+      if (typeof values.repo === "string") gateOpts.repo = values.repo;
+      if (typeof values.run === "string") gateOpts.run = values.run;
+      if (values.all === true) gateOpts.all = true;
+      if (gateCheck) gateOpts.check = true;
+      if (typeof values.decision === "string") {
+        gateOpts.decision = values.decision;
+      }
+      if (actionRaw === "approve" || actionRaw === "reject") {
+        if (typeof positionals[2] === "string") {
+          gateOpts.gateId = positionals[2];
+        } else if (typeof values.id === "string") {
+          gateOpts.gateId = values.id;
+        }
+      }
+      const result = await runGate(gateOpts);
+      return result.exitCode;
+    }
+    case "models": {
+      const actionRaw = positionals[1];
+      if (!actionRaw || !MODELS_ACTIONS.has(actionRaw)) {
+        process.stderr.write(
+          `error: models requires route\n\n${HELP}`,
+        );
+        return EXIT.USAGE;
+      }
+      const modelsOpts: Parameters<typeof runModels>[0] = {
+        action: actionRaw as ModelsSubcommand,
+      };
+      if (typeof values.repo === "string") modelsOpts.repo = values.repo;
+      if (typeof values.role === "string") modelsOpts.role = values.role;
+      if (typeof values.task === "string") modelsOpts.task = values.task;
+      if (typeof values.run === "string") modelsOpts.run = values.run;
+      if (typeof values.signals === "string") {
+        modelsOpts.signalsJson = values.signals;
+      }
+      if (typeof values.tier === "string") modelsOpts.tier = values.tier;
+      if (typeof values.model === "string") modelsOpts.model = values.model;
+      if (typeof values.adapter === "string") modelsOpts.adapter = values.adapter;
+      if (values["budget-pressure"] === true) modelsOpts.budgetPressure = true;
+      const result = await runModels(modelsOpts);
+      return result.exitCode;
+    }
+    case "logs": {
+      const logsOpts: Parameters<typeof runLogs>[0] = {
+        follow: values.follow === true,
+      };
+      if (typeof values.run === "string") logsOpts.run = values.run;
+      if (typeof values.repo === "string") logsOpts.repo = values.repo;
+      if (typeof values.limit === "string") {
+        const n = Number(values.limit);
+        if (!Number.isInteger(n) || n < 0) {
+          process.stderr.write("error: --limit must be a non-negative integer\n");
+          return EXIT.USAGE;
+        }
+        logsOpts.limit = n;
+      }
+      const result = await runLogs(logsOpts);
+      return result.exitCode;
+    }
     case "adapter": {
       const actionRaw = positionals[1];
       if (!actionRaw || !ADAPTER_ACTIONS.has(actionRaw)) {
         process.stderr.write(
           `error: adapter requires list|register|test\n\n${HELP}`,
         );
-        return 2;
+        return EXIT.USAGE;
       }
       const action = actionRaw as AdapterSubcommand;
       const adapterOpts: Parameters<typeof runAdapter>[0] = { action };
@@ -181,14 +455,11 @@ async function main(argv: string[]): Promise<number> {
         adapterOpts.capabilitiesJson = values.capabilities;
       }
       if (values.enabled === true) adapterOpts.enabledOnly = true;
-      // list: resolve-only by default; --probe opts into version exec
       if (values.probe === true) adapterOpts.probe = true;
       if (values["skip-probe"] === true) adapterOpts.skipProbe = true;
-      // Positional id for `adapter test <id>`
       if (action === "test" && typeof positionals[2] === "string") {
         adapterOpts.id = positionals[2];
       }
-      // Positional id for `adapter register <id>` when --id omitted
       if (action === "register" && !adapterOpts.id && typeof positionals[2] === "string") {
         adapterOpts.id = positionals[2];
       }
@@ -201,27 +472,25 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write(
           `error: context requires list|get|set|delete\n\n${HELP}`,
         );
-        return 2;
+        return EXIT.USAGE;
       }
       const action = actionRaw as ContextSubcommand;
       const runId =
         typeof values.run === "string" ? values.run : undefined;
       if (!runId) {
         process.stderr.write("error: --run <id> is required for context\n");
-        return 2;
+        return EXIT.USAGE;
       }
       const ctxOpts: Parameters<typeof runContext>[0] = {
         action,
         run: runId,
       };
       if (typeof values.repo === "string") ctxOpts.repo = values.repo;
-      // positionals: context <action> [key] [value...]
       if (action === "get" || action === "delete") {
         if (typeof positionals[2] === "string") ctxOpts.key = positionals[2];
       } else if (action === "set") {
         if (typeof positionals[2] === "string") ctxOpts.key = positionals[2];
         if (positionals.length >= 4) {
-          // Join remaining args so unquoted multi-word values work.
           ctxOpts.value = positionals.slice(3).join(" ");
         }
       }
@@ -230,7 +499,7 @@ async function main(argv: string[]): Promise<number> {
     }
     default: {
       process.stderr.write(`error: unknown command '${command}'\n\n${HELP}`);
-      return 2;
+      return EXIT.USAGE;
     }
   }
 }

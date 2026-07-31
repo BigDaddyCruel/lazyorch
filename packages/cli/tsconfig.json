@@ -10,6 +10,7 @@
   "references": [
     { "path": "../shared" },
     { "path": "../core" },
-    { "path": "../adapters" }
+    { "path": "../adapters" },
+    { "path": "../daemon" }
   ]
 }
