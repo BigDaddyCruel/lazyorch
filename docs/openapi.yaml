@@ -2,7 +2,145 @@ openapi: 3.1.0
 info:
   title: LazyOrch API
   description: |
-    HTTP API for the LazyOrch daemon.
-    Placeholder — full paths and schemas land with the daemon implementation.
-  version: 0.0.0
-paths: {}
+    HTTP API for the LazyOrch user-level daemon (loopback).
+    PR-06 stubs: health, projects, runs list, adapters, models/route, SSE events.
+    Full schemas land with later PRs.
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:7420
+    description: Default local daemon
+paths:
+  /health:
+    get:
+      summary: Liveness / health probe (no auth)
+      operationId: getHealth
+      responses:
+        "200":
+          description: Daemon is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/health:
+    get:
+      summary: Liveness / health probe (v1 alias)
+      operationId: getHealthV1
+      responses:
+        "200":
+          description: Daemon is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/status:
+    get:
+      summary: Global overview (projects + run counts)
+      operationId: getStatus
+      responses:
+        "200":
+          description: Status payload
+  /v1/projects:
+    get:
+      summary: List registered project roots
+      operationId: listProjects
+      responses:
+        "200":
+          description: Registered projects
+  /v1/projects/init:
+    post:
+      summary: Register a project root with the daemon
+      operationId: initProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [repo_root]
+              properties:
+                repo_root:
+                  type: string
+                id:
+                  type: string
+                name:
+                  type: string
+      responses:
+        "200":
+          description: Project registered
+  /v1/runs:
+    get:
+      summary: List runs (stub; empty until orchestrator wired)
+      operationId: listRuns
+      parameters:
+        - name: project
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Run list
+  /v1/adapters:
+    get:
+      summary: Adapter registry list + health (stub)
+      operationId: listAdapters
+      responses:
+        "200":
+          description: Built-in adapter stubs
+  /v1/models/route:
+    get:
+      summary: Dry-run model router (stub)
+      operationId: routeModel
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+        - name: task
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Routing decision stub
+  /v1/events:
+    get:
+      summary: Server-Sent Events stream (ephemeral)
+      operationId: streamEvents
+      parameters:
+        - name: project
+          in: query
+          description: Optional project_id filter
+          schema:
+            type: string
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        status:
+          type: string
+        api_major:
+          type: integer
+        host:
+          type: string
+        port:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+        pid:
+          type: integer
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token from ~/.lazyorch/daemon.token (required off-loopback)
