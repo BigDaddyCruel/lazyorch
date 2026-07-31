@@ -4,6 +4,7 @@
  * PR-03: dual FSM engine (run + task), exit predicate, simulator.
  * PR-05: planning engine (validators, consensus, fake ports, replan hooks).
  * PR-10: model complexity router (estimator KD-41, router KD-42).
+ * PR-12: scheduler, slots, elastic workers (+ router at assign).
  * PR-14: shared run context KV (context.json + write ACL).
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
@@ -223,3 +224,66 @@ export {
   type DryRunRouteParams,
   type DryRunRouteResult,
 } from "./models/index.js";
+
+export {
+  // slots
+  sessionHoldsSlot,
+  phaseNeedsLeadReservation,
+  computeSlotUsage,
+  freeForWorkers,
+  canStartSession,
+  freeForWorkersFromSessions,
+  slotLimitsFromConfig,
+  // elasticity
+  clampInt,
+  computeDesiredWorkers,
+  applyHostPressure,
+  decideScale,
+  idleDrainCandidates,
+  // critical path
+  REMAINING_STATUSES,
+  isRemainingStatus,
+  criticalPathLengths,
+  isOnCriticalPath,
+  sortReadyForAssign,
+  // assign
+  assignReadyTasks,
+  assignReadyTasksAsync,
+  releaseTaskScopeLocks,
+  // metrics + tick
+  SchedulerMetrics,
+  planElasticity,
+  schedulerTick,
+  schedulerTickAsync,
+  defaultSchedulerConfig,
+  // fakes
+  FakeScopeLockManager,
+  FakeWorktreePort,
+  // types
+  LEAD_RESERVE_PHASES,
+  emptySchedulerRuntime,
+  type AssignReadyOptions,
+  type AssignRoutingOptions,
+  type SchedulerTickInput,
+  type SchedulerTickResult,
+  type SchedulerSessionState,
+  type SchedulerSession,
+  type SlotUsage,
+  type SlotLimits,
+  type FreeForWorkersInput,
+  type ScopeLockAcquireResult,
+  type ScopeLockPort,
+  type WorktreePaths,
+  type WorktreePort,
+  type HostPressure,
+  type DesiredWorkersInput,
+  type ScaleActionKind,
+  type ScaleDecision,
+  type ScopeLockWait,
+  type AssignTaskResult,
+  type AssignSkipReason,
+  type AssignSkip,
+  type AssignBatchResult,
+  type SchedulerConfig,
+  type SchedulerRuntimeState,
+} from "./scheduler/index.js";
