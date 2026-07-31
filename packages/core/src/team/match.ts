@@ -1,9 +1,10 @@
 /**
- * Role-template matching for scheduler assign (PR-12 deferred → PR-13).
+ * Role-template matching for scheduler assign (PR-13).
  *
  * On spawn / mint worker:
  * 1. Intersection of ready task role_affinity with template tags
- * 2. If multiple templates match, prefer the one matching highest-priority ready task
+ * 2. If multiple templates match, prefer specialized (non-generic) tags first,
+ *    then more matched tags, then operator worker_templates order
  * 3. If none match, use fullstack-dev fallback
  */
 
@@ -23,6 +24,16 @@ export interface MatchWorkerTemplateResult {
   /** True when no affinity matched and fullstack-dev (or first configured) was used. */
   used_fallback: boolean;
 }
+
+/**
+ * Generic affinity tags that do not distinguish specialized worker templates.
+ * When multi-matching, specialized (non-generic) overlaps win over generic-only.
+ */
+export const GENERIC_WORKER_TAGS: ReadonlySet<string> = new Set([
+  "worker",
+  "fullstack",
+  "fullstack-dev",
+]);
 
 function normalizeTag(s: string): string {
   return s.trim().toLowerCase();
@@ -60,11 +71,20 @@ export function affinityIntersection(
   return matched;
 }
 
+/** Count matched tags that are not generic (backend, frontend, api, …). */
+export function specializedMatchCount(matchedTags: readonly string[]): number {
+  let n = 0;
+  for (const t of matchedTags) {
+    if (!GENERIC_WORKER_TAGS.has(normalizeTag(t))) n += 1;
+  }
+  return n;
+}
+
 /**
  * Pick worker template for a single task's role_affinity.
  *
  * @param roleAffinity - task.role_affinity
- * @param workerTemplates - config team.worker_templates (ordered preference among matches)
+ * @param workerTemplates - config team.worker_templates (tie-break among equal specificity)
  * @param catalog - optional extra templates (defaults to built-ins + synthetic for unknown ids)
  */
 export function matchWorkerTemplate(
@@ -93,16 +113,21 @@ export function matchWorkerTemplate(
   }
 
   if (matches.length > 1) {
-    // Prefer first configured worker_templates entry among matches (operator order).
+    // Prefer specialized tag overlap before operator order so design affinities
+    // like ["backend", "worker"] select backend-dev over fullstack-dev.
     const order = new Map(workerTemplates.map((id, i) => [id, i]));
     matches.sort((a, b) => {
-      const ia = order.get(a.template.id) ?? Number.MAX_SAFE_INTEGER;
-      const ib = order.get(b.template.id) ?? Number.MAX_SAFE_INTEGER;
-      if (ia !== ib) return ia - ib;
-      // More specific (more matched tags) wins
+      const sa = specializedMatchCount(a.matched_tags);
+      const sb = specializedMatchCount(b.matched_tags);
+      if (sb !== sa) return sb - sa;
+      // Then more total matched tags
       if (b.matched_tags.length !== a.matched_tags.length) {
         return b.matched_tags.length - a.matched_tags.length;
       }
+      // Then operator worker_templates order
+      const ia = order.get(a.template.id) ?? Number.MAX_SAFE_INTEGER;
+      const ib = order.get(b.template.id) ?? Number.MAX_SAFE_INTEGER;
+      if (ia !== ib) return ia - ib;
       return a.template.id.localeCompare(b.template.id);
     });
     const m = matches[0]!;
@@ -131,8 +156,7 @@ export function matchWorkerTemplate(
 
 /**
  * When multiple ready tasks compete for spawn, pick the template matching the
- * highest-priority ready task (priority 1 best), then critical-path order is
- * already applied by assign; here we only break multi-template ties across tasks.
+ * highest-priority ready task (priority 1 best).
  */
 export function matchWorkerTemplateForReadyTasks(
   readyTasks: readonly Task[],

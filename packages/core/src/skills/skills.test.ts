@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
+import { AGENT_ROLES } from "../types/agent.js";
+import {
+  DEFAULT_ROLE_TEMPLATES,
+  skillsForRoleDefault,
+} from "../team/role-templates.js";
 import {
   BUILTIN_SKILL_IDS,
   createSkillLoader,
+  DEFAULT_ROLE_SKILLS,
   isBuiltinSkillId,
   listSkills,
   loadSkill,
@@ -66,5 +72,15 @@ describe("skills catalog + loaders", () => {
     const md = await loadSkillAsync("careful");
     expect(md).toBeTruthy();
     expect(md).toContain("careful");
+  });
+
+  it("role skill bindings stay in parity (catalog / default / templates)", () => {
+    for (const role of AGENT_ROLES) {
+      expect(skillsForRole(role)).toEqual([...DEFAULT_ROLE_SKILLS[role]]);
+      expect(skillsForRoleDefault(role)).toEqual([...DEFAULT_ROLE_SKILLS[role]]);
+    }
+    for (const tpl of DEFAULT_ROLE_TEMPLATES) {
+      expect(tpl.skills).toEqual([...DEFAULT_ROLE_SKILLS[tpl.role]]);
+    }
   });
 });

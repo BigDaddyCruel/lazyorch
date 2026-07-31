@@ -81,6 +81,27 @@ describe("buildTeam", () => {
     });
     expect(built.agents[0]!.preferred_adapters).toEqual(["codex", "claude"]);
   });
+
+  it("threads full-mode gate flags into limits", () => {
+    let n = 0;
+    const built = buildTeam({
+      run_id: "run_gates",
+      mode: "full",
+      min_reviewers: 0,
+      min_qa: 0,
+      gates: {
+        task_approve: true,
+        plan_approve: false,
+        merge: false,
+      },
+      nextAgentId: () => `agt_${++n}`,
+    });
+    expect(built.limits.gates).toEqual({
+      task_approve: true,
+      plan_approve: false,
+      merge: false,
+    });
+  });
 });
 
 describe("mintWorkerAgent", () => {
@@ -112,5 +133,22 @@ describe("preferredAdaptersForRole / preferredAdaptersForAgent", () => {
       nextAgentId: () => "agt_x",
     });
     expect(preferredAdaptersForAgent(agent, "worker")).toEqual(["grok"]);
+  });
+});
+
+describe("resolveRoleTemplate catalog isolation", () => {
+  it("does not mutate shared catalog labels when override path is used", async () => {
+    const { resolveRoleTemplate, getRoleTemplate } = await import(
+      "./role-templates.js"
+    );
+    const resolved = resolveRoleTemplate("fullstack-dev", "worker", {
+      worker: ["codex"],
+    });
+    resolved.labels.push("MUTATED");
+    resolved.skills.push("MUTATED");
+    const again = getRoleTemplate("fullstack-dev")!;
+    expect(again.labels).not.toContain("MUTATED");
+    expect(again.skills).not.toContain("MUTATED");
+    expect(again.preferred_adapters[0]).toBe("claude");
   });
 });

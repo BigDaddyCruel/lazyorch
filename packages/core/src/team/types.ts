@@ -75,6 +75,15 @@ export interface BuildTeamInput {
   max_qa?: number;
   min_workers?: number;
   max_workers?: number;
+  /**
+   * Operator gate flags (full mode preserves; solo forces task/plan/merge true).
+   * When omitted, full mode uses design defaults (task_approve false, plan/merge true).
+   */
+  gates?: {
+    task_approve?: boolean;
+    plan_approve?: boolean;
+    merge?: boolean;
+  };
   /** Override preferred adapters by role (optional). */
   preferred_adapters_by_role?: Partial<Record<AgentRole, readonly string[]>>;
   /** ISO timestamp; defaults to now. */

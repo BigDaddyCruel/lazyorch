@@ -262,6 +262,72 @@ describe("assignReadyTasks", () => {
     );
   });
 
+  it("matches [backend, worker] design affinity to backend-dev", () => {
+    const locks = new FakeScopeLockManager();
+    const result = assignReadyTasks({
+      tasks: [
+        task("tsk_bw", {
+          role_affinity: ["backend", "worker"],
+          scope: ["src/api/**"],
+        }),
+      ],
+      sessions: [],
+      phase: "Implementing",
+      limits,
+      locks,
+      now_ms: 1,
+      worker_templates: ["fullstack-dev", "backend-dev", "frontend-dev"],
+      routing: { routeFn: () => fixedRoute },
+      nextAgentId: () => "agt_bw",
+    });
+    expect(result.assigned[0]!.session_plan.worker_template_id).toBe(
+      "backend-dev",
+    );
+  });
+
+  it("prefers idle worker whose labels match the template", () => {
+    const locks = new FakeScopeLockManager();
+    const sessions: SchedulerSession[] = [
+      {
+        run_handle: "idle_fs",
+        agent_id: "agt_fs",
+        role: "worker",
+        state: "idle",
+        last_activity_ms: 0,
+        labels: ["fullstack-dev", "worker"],
+      },
+      {
+        run_handle: "idle_be",
+        agent_id: "agt_be",
+        role: "worker",
+        state: "idle",
+        last_activity_ms: 10,
+        labels: ["backend-dev", "backend", "worker"],
+      },
+    ];
+    const result = assignReadyTasks({
+      tasks: [
+        task("tsk_be2", {
+          role_affinity: ["backend", "worker"],
+          scope: ["src/be/**"],
+        }),
+      ],
+      sessions,
+      phase: "Implementing",
+      limits,
+      locks,
+      now_ms: 100,
+      worker_templates: ["fullstack-dev", "backend-dev", "frontend-dev"],
+      routing: { routeFn: () => fixedRoute },
+    });
+    expect(result.assigned).toHaveLength(1);
+    expect(result.assigned[0]!.session_plan.reused_idle).toBe(true);
+    expect(result.assigned[0]!.session_plan.run_handle).toBe("idle_be");
+    expect(result.assigned[0]!.session_plan.worker_template_id).toBe(
+      "backend-dev",
+    );
+  });
+
   it("assigns multiple non-overlapping tasks up to free slots", () => {
     const locks = new FakeScopeLockManager();
     const worktrees = new FakeWorktreePort();

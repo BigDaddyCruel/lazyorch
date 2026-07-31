@@ -30,19 +30,12 @@ export function skillsForRole(role: AgentRole): string[] {
 }
 
 /**
- * Load skill markdown text.
- * Prefer embedded stubs (always available); optional filesystem override
- * under packages/core/skills/<id>.md when `fromDisk` is true.
+ * Load skill markdown text from embedded stubs (sync, always available).
+ * For filesystem packages/core/skills/<id>.md, use `loadSkillAsync` or
+ * `createSkillLoader({ fromDisk: true })`.
  */
-export function loadSkill(
-  skillId: string,
-  options?: { fromDisk?: boolean },
-): string | null {
+export function loadSkill(skillId: string): string | null {
   if (!isBuiltinSkillId(skillId)) return null;
-  if (options?.fromDisk === true) {
-    // Sync disk load is not provided; use loadSkillAsync for disk.
-    return SKILL_STUBS[skillId];
-  }
   return SKILL_STUBS[skillId];
 }
 

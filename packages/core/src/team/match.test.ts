@@ -42,6 +42,18 @@ describe("matchWorkerTemplate", () => {
     expect(m.matched_tags.map((t) => t.toLowerCase())).toContain("backend");
   });
 
+  it("matches design affinity [backend, worker] to backend-dev not fullstack", () => {
+    const m = matchWorkerTemplate(["backend", "worker"], templates);
+    expect(m.template_id).toBe("backend-dev");
+    expect(m.used_fallback).toBe(false);
+  });
+
+  it("matches design affinity [frontend, worker] to frontend-dev not fullstack", () => {
+    const m = matchWorkerTemplate(["frontend", "worker"], templates);
+    expect(m.template_id).toBe("frontend-dev");
+    expect(m.used_fallback).toBe(false);
+  });
+
   it("matches frontend affinity to frontend-dev", () => {
     const m = matchWorkerTemplate(["frontend-dev"], templates);
     expect(m.template_id).toBe("frontend-dev");
@@ -55,11 +67,11 @@ describe("matchWorkerTemplate", () => {
     expect(m.matched_tags).toEqual([]);
   });
 
-  it("prefers operator-ordered template when multiple match", () => {
-    // fullstack labels include backend+frontend; backend-dev also matches backend
-    const m = matchWorkerTemplate(["backend"], [
-      "backend-dev",
+  it("prefers specialized template over operator order when both match", () => {
+    // fullstack listed first; only backend-dev has specialized "backend" tag
+    const m = matchWorkerTemplate(["backend", "worker"], [
       "fullstack-dev",
+      "backend-dev",
     ]);
     expect(m.template_id).toBe("backend-dev");
   });
@@ -67,6 +79,11 @@ describe("matchWorkerTemplate", () => {
   it("case-insensitive affinity matching", () => {
     const m = matchWorkerTemplate(["Backend"], templates);
     expect(m.template_id).toBe("backend-dev");
+  });
+
+  it("generic-only worker affinity selects fullstack when listed first", () => {
+    const m = matchWorkerTemplate(["worker"], templates);
+    expect(m.template_id).toBe("fullstack-dev");
   });
 });
 
@@ -81,7 +98,7 @@ describe("matchWorkerTemplateForReadyTasks", () => {
   it("uses highest-priority ready task for multi-template choice", () => {
     const ready = [
       task("t_low", ["frontend"], 3),
-      task("t_high", ["backend"], 1),
+      task("t_high", ["backend", "worker"], 1),
     ];
     const m = matchWorkerTemplateForReadyTasks(ready, [
       "fullstack-dev",

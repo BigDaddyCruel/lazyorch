@@ -39,6 +39,7 @@ export function buildTeam(input: BuildTeamInput): BuiltTeam {
   }
   if (input.min_qa !== undefined) modeInput.min_qa = input.min_qa;
   if (input.max_qa !== undefined) modeInput.max_qa = input.max_qa;
+  if (input.gates !== undefined) modeInput.gates = input.gates;
   const limits = resolveTeamMode(modeInput);
 
   const nextId = input.nextAgentId ?? (() => generateId("agt"));

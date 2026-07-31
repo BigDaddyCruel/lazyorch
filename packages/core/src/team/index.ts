@@ -19,6 +19,7 @@ export {
   DEFAULT_PREFERRED_ADAPTERS_BY_ROLE,
   FALLBACK_WORKER_TEMPLATE,
   DEFAULT_ROLE_TEMPLATES,
+  cloneRoleTemplate,
   getRoleTemplate,
   listRoleTemplateIds,
   preferredAdaptersForRole,
@@ -35,8 +36,10 @@ export {
 } from "./mode.js";
 
 export {
+  GENERIC_WORKER_TAGS,
   templateTagSet,
   affinityIntersection,
+  specializedMatchCount,
   matchWorkerTemplate,
   matchWorkerTemplateForReadyTasks,
   type MatchWorkerTemplateResult,
