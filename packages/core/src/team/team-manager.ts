@@ -11,7 +11,11 @@ import {
   defaultTemplateIdForRole,
   resolveRoleTemplate,
 } from "./role-templates.js";
-import type { BuildTeamInput, BuiltTeam, EffectiveTeamLimits } from "./types.js";
+import type {
+  BuildTeamInput,
+  BuiltTeam,
+  EffectiveTeamLimits,
+} from "./types.js";
 
 function nowIso(now?: string): string {
   return now ?? new Date().toISOString();
@@ -171,6 +175,37 @@ export function mintWorkerAgent(input: {
     id: input.nextAgentId?.() ?? generateId("agt"),
     run_id: input.run_id,
     role: "worker",
+    labels: [...tpl.labels],
+    preferred_adapters: adapters,
+    created_at: nowIso(input.now),
+  };
+  if (tpl.default_tier !== undefined) agent.default_tier = tpl.default_tier;
+  return agent;
+}
+
+/**
+ * Mint a plan_writer or plan_reviewer agent (Planning phase — PR-15).
+ * Distinct agents by default; solo may collapse them (same id) at the caller.
+ */
+export function mintPlanAgent(input: {
+  run_id: string;
+  role: "plan_writer" | "plan_reviewer";
+  template_id?: string;
+  preferred_adapters?: readonly string[];
+  now?: string;
+  nextAgentId?: () => string;
+}): Agent {
+  const tid = input.template_id ?? defaultTemplateIdForRole(input.role);
+  const tpl = resolveRoleTemplate(tid, input.role);
+  const adapters =
+    input.preferred_adapters && input.preferred_adapters.length > 0
+      ? [...input.preferred_adapters]
+      : [...tpl.preferred_adapters];
+  const agent: Agent = {
+    schema_version: SCHEMA_VERSION,
+    id: input.nextAgentId?.() ?? generateId("agt"),
+    run_id: input.run_id,
+    role: input.role,
     labels: [...tpl.labels],
     preferred_adapters: adapters,
     created_at: nowIso(input.now),
