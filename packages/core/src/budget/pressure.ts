@@ -45,6 +45,7 @@ export type BudgetPressureReason =
   | "hours_remaining"
   | "usd_remaining"
   | "hours_tight_usd_unknown"
+  | "exhausted"
   | "none";
 
 export interface BudgetEvaluation {
@@ -141,6 +142,7 @@ export function evaluateBudget(params: {
 
   const pressure = computePressure({
     remaining_agent_hours,
+    remaining_run_hours,
     remaining_usd,
     usd_known: usage.usd_known,
     thresholds,
@@ -164,6 +166,7 @@ export function evaluateBudget(params: {
 
 function computePressure(input: {
   remaining_agent_hours: number | null;
+  remaining_run_hours: number | null;
   remaining_usd: number | null;
   usd_known: boolean;
   thresholds: BudgetPressureThresholds;
@@ -176,7 +179,7 @@ function computePressure(input: {
   if (input.exhausted) {
     return {
       budget_pressure: true,
-      pressure_reason: "none",
+      pressure_reason: "exhausted",
       message: "budget exhausted",
     };
   }
@@ -204,24 +207,35 @@ function computePressure(input: {
     };
   }
 
-  // Hours remaining under threshold
-  if (
+  // Agent-hours remaining under threshold
+  const agentTight =
     hoursThresh !== null &&
     input.remaining_agent_hours !== null &&
-    input.remaining_agent_hours < hoursThresh
-  ) {
+    input.remaining_agent_hours < hoursThresh;
+
+  // Run wall-clock remaining under same hours threshold (Issue 4)
+  const runTight =
+    hoursThresh !== null &&
+    input.remaining_run_hours !== null &&
+    input.remaining_run_hours < hoursThresh;
+
+  if (agentTight || runTight) {
+    const remaining = agentTight
+      ? (input.remaining_agent_hours as number)
+      : (input.remaining_run_hours as number);
+    const kind = agentTight ? "agent" : "run";
     // Prefer lower tiers when USD unknown and hours tight (design)
     if (!input.usd_known) {
       return {
         budget_pressure: true,
         pressure_reason: "hours_tight_usd_unknown",
-        message: `remaining_agent_hours ${input.remaining_agent_hours.toFixed(4)} < threshold ${hoursThresh} (usd unknown)`,
+        message: `remaining_${kind}_hours ${remaining.toFixed(4)} < threshold ${hoursThresh} (usd unknown)`,
       };
     }
     return {
       budget_pressure: true,
       pressure_reason: "hours_remaining",
-      message: `remaining_agent_hours ${input.remaining_agent_hours.toFixed(4)} < threshold ${hoursThresh}`,
+      message: `remaining_${kind}_hours ${remaining.toFixed(4)} < threshold ${hoursThresh}`,
     };
   }
 

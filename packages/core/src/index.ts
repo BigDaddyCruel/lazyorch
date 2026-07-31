@@ -339,6 +339,7 @@ export {
   filterDrainHandlesAfterAssign,
   isStillDrainable,
   applyAssignToSessions,
+  resolveTickBudgetSignals,
   schedulerTick,
   schedulerTickAsync,
   defaultSchedulerConfig,
@@ -372,6 +373,7 @@ export {
   type AssignBatchResult,
   type SchedulerConfig,
   type SchedulerRuntimeState,
+  type SchedulerBudgetInput,
 } from "./scheduler/index.js";
 
 export {
@@ -425,6 +427,7 @@ export {
   canRestartReviewer,
   canRestartQa,
   decideEphemeralRestart,
+  RoleRestartRegistry,
   // team manager
   buildTeam,
   mintWorkerAgent,
@@ -452,6 +455,8 @@ export {
   type CanRestartLeadInput,
   type CanRestartReviewerInput,
   type CanRestartQaInput,
+  type RoleRestartRegistryOptions,
+  type RoleRestartDecision,
 } from "./team/index.js";
 
 export {

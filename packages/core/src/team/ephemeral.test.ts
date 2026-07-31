@@ -164,8 +164,12 @@ describe("ephemeral session policy", () => {
     expect(q.map((t) => t.id).sort()).toEqual(["a", "b"]);
   });
 
-  it("withinRestartBudget", () => {
+  it("withinRestartBudget allows N restarts inclusive", () => {
+    // max=6 → restarts 0..6 allowed; 7th crash exhausts
     expect(withinRestartBudget(5, 6)).toBe(true);
-    expect(withinRestartBudget(6, 6)).toBe(false);
+    expect(withinRestartBudget(6, 6)).toBe(true);
+    expect(withinRestartBudget(7, 6)).toBe(false);
+    expect(withinRestartBudget(0, 0)).toBe(true); // first start; post-crash uses count≥1
+    expect(withinRestartBudget(1, 0)).toBe(false);
   });
 });

@@ -49,11 +49,13 @@ export {
   filterDrainHandlesAfterAssign,
   isStillDrainable,
   applyAssignToSessions,
+  resolveTickBudgetSignals,
   schedulerTick,
   schedulerTickAsync,
   defaultSchedulerConfig,
   type SchedulerTickInput,
   type SchedulerTickResult,
+  type SchedulerBudgetInput,
 } from "./scheduler.js";
 
 export { FakeScopeLockManager, FakeWorktreePort } from "./fakes.js";

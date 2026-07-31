@@ -6,6 +6,7 @@ import {
   estimateUsdFromTokens,
   resolveEstimatedUsd,
   aggregateUsage,
+  mergeAggregatedUsage,
   evaluateBudget,
   usageSnapshotFrom,
   isBudgetPressure,
@@ -93,23 +94,39 @@ describe("aggregateUsage", () => {
     expect(agg.estimated_usd).toBeCloseTo(1.0, 5); // haiku in_per_mtok 1.0
   });
 
-  it("marks usd incomplete when tokens lack rates and no cost", () => {
-    const agg = aggregateUsage(
-      [{ input_tokens: 100, output_tokens: 0, model: "totally-unknown-model-xyz" }],
-      {
-        estimate_missing: true,
-        model_rates: {}, // no default either if we only use operator empty...
-      },
-    );
-    // mergeModelRates still has defaults + "default" entry, so unknown model
-    // falls back to default rate → known. Force no estimate:
+  it("marks usd incomplete when estimate_missing false and no cost", () => {
     const agg2 = aggregateUsage(
       [{ input_tokens: 100, output_tokens: 0 }],
       { estimate_missing: false },
     );
     expect(agg2.usd_known).toBe(false);
     expect(agg2.usd_complete).toBe(false);
-    expect(agg.sessions).toBe(1);
+  });
+
+  it("unknown model still estimates via default rate when estimate_missing", () => {
+    const agg = aggregateUsage(
+      [{ input_tokens: 1_000_000, output_tokens: 0, model: "totally-unknown-xyz" }],
+      { estimate_missing: true, model_rates: {} },
+    );
+    expect(agg.usd_known).toBe(true);
+    expect(agg.estimated_usd).toBeCloseTo(2.0, 5); // default rate
+  });
+
+  it("mergeAggregatedUsage requires both sides complete for usd_complete", () => {
+    const a = aggregateUsage(
+      [{ estimated_usd: 1, input_tokens: 10 }],
+      { estimate_missing: false },
+    );
+    const b = aggregateUsage(
+      [{ input_tokens: 10 }],
+      { estimate_missing: false },
+    );
+    expect(a.usd_complete).toBe(true);
+    expect(b.usd_complete).toBe(false);
+    const m = mergeAggregatedUsage(a, b);
+    expect(m.usd_complete).toBe(false);
+    expect(m.usd_known).toBe(true);
+    expect(m.estimated_usd).toBe(1);
   });
 });
 
@@ -217,6 +234,37 @@ describe("evaluateBudget / pressure", () => {
     });
     expect(ev.budget_pressure).toBe(false);
     expect(ev.budget_exhausted).toBe(false);
+  });
+
+  it("pressure from remaining run hours alone", () => {
+    const ev = evaluateBudget({
+      limits: { max_run_hours: 1 },
+      usage: {
+        agent_hours: 0,
+        run_hours: 0.9,
+        estimated_usd: 0,
+        usd_known: true,
+      },
+      thresholds: { budget_pressure_threshold_hours: 0.25 },
+    });
+    expect(ev.budget_pressure).toBe(true);
+    expect(ev.pressure_reason).toBe("hours_remaining");
+    expect(ev.remaining_run_hours).toBeCloseTo(0.1, 5);
+  });
+
+  it("exhausted sets pressure_reason exhausted", () => {
+    const ev = evaluateBudget({
+      limits: { max_agent_hours: 1 },
+      usage: {
+        agent_hours: 2,
+        run_hours: 2,
+        estimated_usd: 0,
+        usd_known: false,
+      },
+    });
+    expect(ev.budget_exhausted).toBe(true);
+    expect(ev.budget_pressure).toBe(true);
+    expect(ev.pressure_reason).toBe("exhausted");
   });
 
   it("usageSnapshotFrom maps aggregated usage", () => {

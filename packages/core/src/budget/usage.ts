@@ -131,10 +131,6 @@ export function mergeAggregatedUsage(
   a: AggregatedUsage,
   b: AggregatedUsage,
 ): AggregatedUsage {
-  const sessions_without_a =
-    a.sessions_with_tokens - a.sessions_with_usd > 0 || !a.usd_complete;
-  const sessions_without_b =
-    b.sessions_with_tokens - b.sessions_with_usd > 0 || !b.usd_complete;
   return {
     input_tokens: a.input_tokens + b.input_tokens,
     output_tokens: a.output_tokens + b.output_tokens,
@@ -142,9 +138,7 @@ export function mergeAggregatedUsage(
     sessions_with_tokens: a.sessions_with_tokens + b.sessions_with_tokens,
     sessions_with_usd: a.sessions_with_usd + b.sessions_with_usd,
     sessions: a.sessions + b.sessions,
-    usd_complete: a.usd_complete && b.usd_complete && !sessions_without_a && !sessions_without_b
-      ? true
-      : a.usd_complete && b.usd_complete,
+    usd_complete: a.usd_complete && b.usd_complete,
     usd_known: a.usd_known || b.usd_known,
   };
 }

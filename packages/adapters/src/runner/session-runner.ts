@@ -177,12 +177,20 @@ class SessionRunnerImpl implements SessionRunner {
     this.isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
     this.enable_stall =
       options.enable_stall ?? this.stall_timeout_ms > 0;
+    // Always seed tracker with merged design defaults + operator model_rates.
     this.budget_tracker =
       options.budget_tracker ??
       new BudgetHoursTracker({
         run_id: options.run_id,
         now: this.now,
+        ...(this.budget.model_rates !== undefined
+          ? { model_rates: this.budget.model_rates }
+          : {}),
       });
+    // If a tracker was injected without rates, still apply operator rates when set.
+    if (options.budget_tracker && this.budget.model_rates) {
+      this.budget_tracker.setModelRates(this.budget.model_rates);
+    }
   }
 
   checkBudget(): BudgetHardStopResult {
@@ -399,7 +407,8 @@ class SessionRunnerImpl implements SessionRunner {
       | { kind: "exit"; r: SessionResult }
       | { kind: "timeout" }
       | { kind: "stall" }
-      | { kind: "cancelled" };
+      | { kind: "cancelled" }
+      | { kind: "budget" };
 
     const agentWait: Promise<RaceWinner> = state.agent
       .wait()
@@ -423,6 +432,8 @@ class SessionRunnerImpl implements SessionRunner {
     }
 
     races.push(this.watchCancel(state, abort));
+    // Mid-session hard-stop (hours always; USD when known) — Issue 5.
+    races.push(this.watchBudgetHardStop(state, abort));
 
     let winner: RaceWinner;
     try {
@@ -434,6 +445,10 @@ class SessionRunnerImpl implements SessionRunner {
         await forceKill("stall");
         void state.agent.wait().catch(() => undefined);
       } else if (winner.kind === "cancelled") {
+        void state.agent.wait().catch(() => undefined);
+      } else if (winner.kind === "budget") {
+        // Cancel this session and all live peers with budget_hard_stop.
+        await this.cancelAll("budget_hard_stop");
         void state.agent.wait().catch(() => undefined);
       }
     } finally {
@@ -457,6 +472,13 @@ class SessionRunnerImpl implements SessionRunner {
         adapter_id: state.agent.adapter_id,
         summary: `session stalled (no log/progress for ${this.stall_timeout_ms}ms)`,
       };
+    } else if (winner.kind === "budget") {
+      result = {
+        status: "cancelled",
+        adapter_id: state.agent.adapter_id,
+        summary: "budget_hard_stop",
+      };
+      state.cancel_reason = "budget_hard_stop";
     } else {
       result = {
         status: "cancelled",
@@ -501,6 +523,7 @@ class SessionRunnerImpl implements SessionRunner {
       state.run_handle,
       result.usage,
       result.model_used ?? state.session.model,
+      state.session.model_tier,
     );
 
     await updateSessionRecord(sessionsFilePath(this.run_dir), state.run_handle, {
@@ -567,6 +590,32 @@ class SessionRunnerImpl implements SessionRunner {
         return { kind: "cancelled" };
       }
       await sleep(25);
+    }
+    return new Promise(() => undefined);
+  }
+
+  /**
+   * Poll hard-stop while the session runs so open wall-clock hours
+   * (and known USD) cancel live work mid-flight (PR-18 Issue 5).
+   */
+  private async watchBudgetHardStop(
+    _state: ManagedState,
+    abort: { stopped: boolean },
+  ): Promise<{ kind: "budget" }> {
+    // No limits configured → never fire.
+    const hasLimit =
+      (this.budget.max_agent_hours != null && this.budget.max_agent_hours > 0) ||
+      (this.budget.max_run_hours != null && this.budget.max_run_hours > 0) ||
+      (this.budget.max_usd_per_run != null && this.budget.max_usd_per_run > 0);
+    if (!hasLimit) {
+      return new Promise(() => undefined);
+    }
+    while (!abort.stopped) {
+      const stop = this.checkBudget();
+      if (stop.should_stop) {
+        return { kind: "budget" };
+      }
+      await sleep(this.stall_poll_ms);
     }
     return new Promise(() => undefined);
   }

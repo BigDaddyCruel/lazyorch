@@ -13,6 +13,17 @@ export {
 } from "./schema-version.js";
 
 export {
+  DEFAULT_MODEL_RATES,
+  DEFAULT_TIER_RATES,
+  mergeModelRates,
+  lookupModelRate,
+  resolveRate,
+  estimateUsdFromTokens,
+  resolveEstimatedUsd,
+  type ModelRatesTable,
+} from "./model-rates.js";
+
+export {
   generateId,
   ID_PREFIXES,
   isPrefixedId,

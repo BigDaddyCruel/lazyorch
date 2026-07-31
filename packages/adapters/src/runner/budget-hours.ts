@@ -4,10 +4,16 @@
  * - Hours always enforceable (max_agent_hours / max_run_hours).
  * - USD best-effort: hard-stop only when estimated_usd is known and
  *   max_usd_per_run is set and exceeded.
- * - model_rates used to estimate USD when adapters report tokens only.
+ * - Uses shared mergeModelRates / resolveEstimatedUsd (design defaults +
+ *   operator rates + tier fallback) so stock config still estimates USD.
  */
 
-import type { ModelRate } from "@lazyorch/shared";
+import {
+  mergeModelRates,
+  resolveEstimatedUsd,
+  type ModelRate,
+  type ModelTier,
+} from "@lazyorch/shared";
 import type { Usage } from "../types.js";
 
 export interface BudgetHoursLimits {
@@ -15,7 +21,7 @@ export interface BudgetHoursLimits {
   max_run_hours?: number | null;
   max_usd_per_run?: number | null;
   hard_stop?: boolean;
-  /** Operator model id → {in_per_mtok, out_per_mtok} for token→USD. */
+  /** Operator model id → {in_per_mtok, out_per_mtok}; merged over defaults. */
   model_rates?: Readonly<Record<string, ModelRate>>;
 }
 
@@ -36,6 +42,7 @@ export interface SessionUsageEntry {
   /** Best-effort USD (adapter or rates); undefined if unknown. */
   estimated_usd?: number;
   model?: string;
+  tier?: ModelTier | null;
   usd_source?: "adapter" | "rates" | "none";
 }
 
@@ -78,63 +85,70 @@ export interface BudgetHoursTrackerOptions {
   run_started_at_ms?: number;
   /** Injectable clock for tests. */
   now?: () => number;
-  /** Default model rates for token→USD when recording usage. */
+  /**
+   * Operator model rates (merged over design defaults).
+   * Empty / omitted → full DEFAULT_MODEL_RATES.
+   */
   model_rates?: Readonly<Record<string, ModelRate>>;
 }
 
 /**
- * Estimate USD from tokens + rates (USD per million tokens).
- * Returns undefined when rate missing or no tokens.
+ * Estimate USD from tokens + rates via shared resolver.
+ * Prefer adapter estimated_usd; else model/tier/default rates.
+ */
+export function resolveSessionUsd(
+  usage: Usage | undefined,
+  model: string | undefined,
+  rates: Readonly<Record<string, ModelRate>>,
+  tier?: ModelTier | null,
+): { estimated_usd?: number; usd_source: "adapter" | "rates" | "none" } {
+  const args: Parameters<typeof resolveEstimatedUsd>[0] = { rates };
+  if (usage?.estimated_usd !== undefined) {
+    args.estimated_usd = usage.estimated_usd;
+  }
+  if (usage?.input_tokens !== undefined) {
+    args.input_tokens = usage.input_tokens;
+  }
+  if (usage?.output_tokens !== undefined) {
+    args.output_tokens = usage.output_tokens;
+  }
+  if (model !== undefined) args.model = model;
+  if (tier !== undefined) args.tier = tier;
+  const resolved = resolveEstimatedUsd(args);
+  if (resolved.estimated_usd === null) {
+    return { usd_source: "none" };
+  }
+  return {
+    estimated_usd: resolved.estimated_usd,
+    usd_source: resolved.source,
+  };
+}
+
+/**
+ * @deprecated Use resolveSessionUsd (shared rates). Kept for test imports.
+ * Estimate USD from tokens + rates only (no adapter cost preference).
  */
 export function estimateUsdFromRates(
   usage: { input_tokens?: number; output_tokens?: number },
   model: string | undefined,
   rates: Readonly<Record<string, ModelRate>> | undefined,
+  tier?: ModelTier | null,
 ): number | undefined {
-  if (!rates || !model || model === "n/a") return undefined;
-  const rate =
-    rates[model] ??
-    Object.entries(rates).find(
-      ([k]) => k.toLowerCase() === model.toLowerCase(),
-    )?.[1];
-  if (!rate) return undefined;
-  const input = usage.input_tokens ?? 0;
-  const output = usage.output_tokens ?? 0;
-  if (input <= 0 && output <= 0) return undefined;
-  return (
-    (input / 1_000_000) * rate.in_per_mtok +
-    (output / 1_000_000) * rate.out_per_mtok
+  const table = mergeModelRates(rates ?? null);
+  const r = resolveSessionUsd(
+    {
+      ...(usage.input_tokens !== undefined
+        ? { input_tokens: usage.input_tokens }
+        : {}),
+      ...(usage.output_tokens !== undefined
+        ? { output_tokens: usage.output_tokens }
+        : {}),
+    },
+    model,
+    table,
+    tier,
   );
-}
-
-/**
- * Resolve best-effort USD for a session usage blob.
- * Prefer adapter estimated_usd; else model_rates.
- */
-export function resolveSessionUsd(
-  usage: Usage | undefined,
-  model: string | undefined,
-  rates: Readonly<Record<string, ModelRate>> | undefined,
-): { estimated_usd?: number; usd_source: "adapter" | "rates" | "none" } {
-  if (
-    usage?.estimated_usd !== undefined &&
-    Number.isFinite(usage.estimated_usd) &&
-    usage.estimated_usd >= 0
-  ) {
-    return { estimated_usd: usage.estimated_usd, usd_source: "adapter" };
-  }
-  const tokenArgs: { input_tokens?: number; output_tokens?: number } = {};
-  if (usage?.input_tokens !== undefined) {
-    tokenArgs.input_tokens = usage.input_tokens;
-  }
-  if (usage?.output_tokens !== undefined) {
-    tokenArgs.output_tokens = usage.output_tokens;
-  }
-  const fromRates = estimateUsdFromRates(tokenArgs, model, rates);
-  if (fromRates !== undefined) {
-    return { estimated_usd: fromRates, usd_source: "rates" };
-  }
-  return { usd_source: "none" };
+  return r.estimated_usd;
 }
 
 /**
@@ -147,18 +161,22 @@ export class BudgetHoursTracker {
   private readonly now: () => number;
   private readonly sessions = new Map<string, SessionHoursEntry>();
   private readonly usageByHandle = new Map<string, SessionUsageEntry>();
-  private model_rates: Readonly<Record<string, ModelRate>>;
+  private model_rates: Record<string, ModelRate>;
 
   constructor(options: BudgetHoursTrackerOptions) {
     this.run_id = options.run_id;
     this.now = options.now ?? Date.now;
     this.run_started_at_ms = options.run_started_at_ms ?? this.now();
-    this.model_rates = options.model_rates ?? {};
+    // Always merge design defaults; empty operator table keeps defaults.
+    this.model_rates = mergeModelRates(options.model_rates ?? null);
   }
 
-  /** Update rates used for subsequent usage estimates. */
-  setModelRates(rates: Readonly<Record<string, ModelRate>>): void {
-    this.model_rates = rates;
+  /**
+   * Update rates used for subsequent usage estimates.
+   * Empty `{}` is treated as “keep/restore defaults,” not wipe.
+   */
+  setModelRates(rates: Readonly<Record<string, ModelRate>> | null | undefined): void {
+    this.model_rates = mergeModelRates(rates ?? null);
   }
 
   recordSessionStart(runHandle: string, startedAtMs?: number): void {
@@ -173,7 +191,6 @@ export class BudgetHoursTracker {
     const existing = this.sessions.get(runHandle);
     const ended_at_ms = endedAtMs ?? this.now();
     if (!existing) {
-      // Session we never saw start — still record zero-duration close.
       this.sessions.set(runHandle, {
         run_handle: runHandle,
         started_at_ms: ended_at_ms,
@@ -196,9 +213,14 @@ export class BudgetHoursTracker {
     runHandle: string,
     usage: Usage | undefined,
     model?: string,
+    tier?: ModelTier | null,
   ): SessionUsageEntry {
-    const rates = this.model_rates;
-    const resolved = resolveSessionUsd(usage, model, rates);
+    const resolved = resolveSessionUsd(
+      usage,
+      model,
+      this.model_rates,
+      tier,
+    );
     const entry: SessionUsageEntry = {
       run_handle: runHandle,
       input_tokens: usage?.input_tokens ?? 0,
@@ -210,6 +232,9 @@ export class BudgetHoursTracker {
     }
     if (model !== undefined) {
       entry.model = model;
+    }
+    if (tier !== undefined) {
+      entry.tier = tier;
     }
     this.usageByHandle.set(runHandle, entry);
     return entry;
@@ -303,15 +328,15 @@ export class BudgetHoursTracker {
   /**
    * Hard-stop check.
    * Hours always when limits set; USD only when usd_known and max_usd set.
-   * When hard_stop is true (default) and a limit is exceeded, should_stop is true.
+   * Empty limits.model_rates does not wipe design defaults.
    */
   checkHardStop(
     limits: BudgetHoursLimits,
     atMs?: number,
   ): BudgetHardStopResult {
-    // Prefer rates from limits when provided for subsequent estimate consistency
-    if (limits.model_rates) {
-      this.model_rates = limits.model_rates;
+    // Only apply operator rates when non-empty; empty {} keeps defaults.
+    if (limits.model_rates && Object.keys(limits.model_rates).length > 0) {
+      this.model_rates = mergeModelRates(limits.model_rates);
     }
 
     const snapshot = this.snapshot(atMs);
@@ -347,7 +372,6 @@ export class BudgetHoursTracker {
       };
     }
 
-    // USD best-effort: only when known
     const maxUsd = limits.max_usd_per_run;
     if (
       maxUsd !== undefined &&

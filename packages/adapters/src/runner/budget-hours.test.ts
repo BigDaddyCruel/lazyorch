@@ -103,35 +103,52 @@ describe("BudgetHoursTracker", () => {
     });
     t.recordSessionEnd("a", 1000);
     t.recordSessionStart("b", 1000);
+    // custom model without adapter cost → default rate fill-in (usd complete)
     t.recordUsage(
       "b",
       { input_tokens: 1_000_000, output_tokens: 0 },
       "custom-model",
     );
-    // no rates → no USD for b; still known from a
     const snap = t.snapshot();
-    expect(snap.estimated_usd).toBeCloseTo(0.75, 5);
+    // 0.75 adapter + 2.0 default rate for 1M in
+    expect(snap.estimated_usd).toBeCloseTo(2.75, 5);
     expect(snap.usd_known).toBe(true);
     expect(snap.input_tokens).toBe(1_001_000);
-    expect(snap.usd_complete).toBe(false);
+    expect(snap.usd_complete).toBe(true);
 
     const stop = t.checkHardStop({ max_usd_per_run: 0.5, hard_stop: true });
     expect(stop.should_stop).toBe(true);
     expect(stop.reason).toBe("max_usd_per_run");
   });
 
-  it("does not USD hard-stop when cost unknown", () => {
-    const t = new BudgetHoursTracker({ run_id: "run_1", run_started_at_ms: 0 });
-    t.recordUsage("x", { input_tokens: 100 }); // no cost, no rates
-    const stop = t.checkHardStop({ max_usd_per_run: 0.01, hard_stop: true });
-    expect(stop.should_stop).toBe(false);
-    expect(stop.reason).toBe("none");
-    expect(stop.snapshot.usd_known).toBe(false);
+  it("estimates USD from design defaults when operator rates empty", () => {
+    // Stock config: model_rates {} → still merge DEFAULT_MODEL_RATES
+    const t = new BudgetHoursTracker({
+      run_id: "run_1",
+      run_started_at_ms: 0,
+      model_rates: {},
+    });
+    const entry = t.recordUsage(
+      "s1",
+      { input_tokens: 1_000_000, output_tokens: 0 },
+      "claude-sonnet-4-6",
+    );
+    expect(entry.usd_source).toBe("rates");
+    // sonnet in_per_mtok 3.0
+    expect(entry.estimated_usd).toBeCloseTo(3.0, 5);
+    const stop = t.checkHardStop({
+      max_usd_per_run: 2,
+      hard_stop: true,
+      model_rates: {}, // empty must not wipe defaults
+    });
+    expect(stop.should_stop).toBe(true);
+    expect(stop.reason).toBe("max_usd_per_run");
+    expect(stop.snapshot.usd_known).toBe(true);
   });
 
   it("estimates USD from model_rates when adapter omits cost", () => {
     const rates = {
-      "m1": { in_per_mtok: 2, out_per_mtok: 4 },
+      m1: { in_per_mtok: 2, out_per_mtok: 4 },
     };
     const t = new BudgetHoursTracker({
       run_id: "run_1",
@@ -149,6 +166,18 @@ describe("BudgetHoursTracker", () => {
     const stop = t.checkHardStop({ max_usd_per_run: 3, hard_stop: true });
     expect(stop.should_stop).toBe(true);
     expect(stop.reason).toBe("max_usd_per_run");
+  });
+
+  it("falls back to default rate for unknown model with tokens", () => {
+    const t = new BudgetHoursTracker({ run_id: "run_1", run_started_at_ms: 0 });
+    const entry = t.recordUsage(
+      "x",
+      { input_tokens: 1_000_000 },
+      "totally-unknown-model-xyz",
+    );
+    expect(entry.usd_source).toBe("rates");
+    // default in_per_mtok = 2.0
+    expect(entry.estimated_usd).toBeCloseTo(2.0, 5);
   });
 });
 

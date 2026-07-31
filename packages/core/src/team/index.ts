@@ -87,6 +87,12 @@ export {
 } from "./restart-policy.js";
 
 export {
+  RoleRestartRegistry,
+  type RoleRestartRegistryOptions,
+  type RoleRestartDecision,
+} from "./restart-registry.js";
+
+export {
   buildTeam,
   mintWorkerAgent,
   mintPlanAgent,
