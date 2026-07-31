@@ -3,9 +3,10 @@ import { AdaptersConfigSchema } from "@lazyorch/shared";
 import { AdapterRegistry } from "./registry.js";
 import type { SpawnImpl } from "../shell/adapter.js";
 import type { ExecImpl } from "./probe.js";
-import { splitTemplateArgv } from "./generic.js";
+import { splitTemplateArgv, templateToArgv } from "./generic.js";
 import { codingCapabilities } from "./catalog.js";
 import type { AdapterRegistration } from "./types.js";
+import { resolveSpawnTarget } from "../spawn-policy.js";
 
 function config(overrides: Record<string, unknown> = {}) {
   return AdaptersConfigSchema.parse(overrides);
@@ -180,7 +181,7 @@ describe("AdapterRegistry", () => {
   });
 });
 
-describe("splitTemplateArgv", () => {
+describe("splitTemplateArgv / templateToArgv", () => {
   it("splits quotes and whitespace", () => {
     expect(splitTemplateArgv(`foo --bar "a b" 'c d'`)).toEqual([
       "foo",
@@ -188,5 +189,51 @@ describe("splitTemplateArgv", () => {
       "a b",
       "c d",
     ]);
+  });
+
+  it("keeps spaced paths as single argv entries", () => {
+    const argv = templateToArgv(
+      "{binary} --model {model} {prompt_file}",
+      {
+        cwd: "C:\\Program Files\\proj",
+        model: "gpt-4o",
+        prompt_file: "C:\\Users\\Some User\\sess\\prompt.md",
+        session_dir: "C:\\Users\\Some User\\sess",
+        timeout_ms: 1000,
+        binary: "C:\\Program Files\\Tools\\aider.cmd",
+      },
+    );
+    expect(argv).toEqual([
+      "C:\\Program Files\\Tools\\aider.cmd",
+      "--model",
+      "gpt-4o",
+      "C:\\Users\\Some User\\sess\\prompt.md",
+    ]);
+  });
+});
+
+describe("resolveSpawnTarget", () => {
+  it("rewrites .cmd under cmd.exe on win32", () => {
+    const t = resolveSpawnTarget(
+      "C:\\npm\\claude.cmd",
+      ["--version"],
+      { platform: "win32", comspec: "C:\\Windows\\System32\\cmd.exe" },
+    );
+    expect(t.via_comspec).toBe(true);
+    expect(t.file).toBe("C:\\Windows\\System32\\cmd.exe");
+    expect(t.args[0]).toBe("/d");
+    expect(t.args[1]).toBe("/s");
+    expect(t.args[2]).toBe("/c");
+    expect(t.args[3]).toContain("claude.cmd");
+    expect(t.args[3]).toContain("--version");
+  });
+
+  it("leaves PE/posix binaries unchanged", () => {
+    const t = resolveSpawnTarget("/usr/bin/claude", ["--version"], {
+      platform: "linux",
+    });
+    expect(t.via_comspec).toBe(false);
+    expect(t.file).toBe("/usr/bin/claude");
+    expect(t.args).toEqual(["--version"]);
   });
 });

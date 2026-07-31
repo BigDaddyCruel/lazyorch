@@ -57,9 +57,13 @@ doctor options:
   --no-ci        Force interactive semantics (overrides CI/GITHUB_ACTIONS env)
 
 adapter usage:
-  lazyorch adapter list [--repo <path>] [--enabled] [--skip-probe]
+  lazyorch adapter list [--repo <path>] [--enabled] [--probe]
   lazyorch adapter register --id <id> --binary <path> [--name <display>] [--start-template <t>] [--capabilities <json>] [--repo <path>]
   lazyorch adapter test [id] [--repo <path>]
+
+  list is resolve-only by default (no version spawn). Pass --probe for live
+  version checks, or use adapter test. Unbound adapters warn (exit 0);
+  hard probe errors fail (exit 1). start_template recommended for custom ids.
 
 context usage:
   lazyorch context list --run <id> [--repo <path>]
@@ -87,6 +91,7 @@ async function main(argv: string[]): Promise<number> {
         "start-template": { type: "string" },
         capabilities: { type: "string" },
         enabled: { type: "boolean", default: false },
+        probe: { type: "boolean", default: false },
         "skip-probe": { type: "boolean", default: false },
         force: { type: "boolean", default: false },
         ci: { type: "boolean", default: false },
@@ -164,6 +169,8 @@ async function main(argv: string[]): Promise<number> {
         adapterOpts.capabilitiesJson = values.capabilities;
       }
       if (values.enabled === true) adapterOpts.enabledOnly = true;
+      // list: resolve-only by default; --probe opts into version exec
+      if (values.probe === true) adapterOpts.probe = true;
       if (values["skip-probe"] === true) adapterOpts.skipProbe = true;
       // Positional id for `adapter test <id>`
       if (action === "test" && typeof positionals[2] === "string") {

@@ -83,14 +83,15 @@ export async function resolveBinary(
 
   // Absolute / relative path — check filesystem directly.
   if (looksLikePath(name)) {
-    if (await exists(name)) return name;
-    // On Windows, try with PATHEXT if bare path has no extension.
+    // Windows: PATHEXT first (where/CreateProcess order), then bare path.
+    // Avoids binding npm's extensionless shim when claude.cmd exists.
     if (platform === "win32" && !/\.[A-Za-z0-9]+$/.test(name)) {
       for (const ext of winExts(env)) {
         const candidate = name + ext;
         if (await exists(candidate)) return candidate;
       }
     }
+    if (await exists(name)) return name;
     return null;
   }
 
@@ -98,13 +99,13 @@ export async function resolveBinary(
 
   for (const dir of dirs) {
     if (platform === "win32") {
-      // Prefer name as-is, then name+ext.
       const base = joinPath(platform, dir, name);
-      if (await exists(base)) return base;
+      // PATHEXT first (matches where.exe / CreateProcess), then extensionless.
       for (const ext of winExts(env)) {
         const p = base + ext;
         if (await exists(p)) return p;
       }
+      if (await exists(base)) return base;
     } else {
       const p = joinPath(platform, dir, name);
       if (await exists(p)) return p;

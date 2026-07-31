@@ -13,6 +13,7 @@ import {
   type ShellAllowlistConfig,
 } from "./allowlist.js";
 import { scrubEnv } from "../scrub.js";
+import { resolveSpawnTarget } from "../spawn-policy.js";
 import type {
   AgentAdapter,
   AgentSession,
@@ -244,7 +245,8 @@ function extractRunHandle(sessionDir: string): string {
 }
 
 /**
- * Real process spawn: argv direct (no shell), stdio → session_dir/stdio.log.
+ * Real process spawn: argv → process, stdio → session_dir/stdio.log.
+ * Windows .cmd/.bat/.ps1 rewritten via ComSpec (spawn-policy); PE/posix direct.
  * detached on non-Windows so runner can kill the process group.
  */
 export async function defaultSpawnImpl(
@@ -259,12 +261,14 @@ export async function defaultSpawnImpl(
     flags: "a",
   });
 
-  const child: ChildProcess = spawn(file, args, {
+  const target = resolveSpawnTarget(file, args);
+  const child: ChildProcess = spawn(target.file, target.args, {
     cwd: req.cwd,
     env: req.env,
     windowsHide: true,
     // Process group on POSIX for tree kill; Windows uses taskkill /T.
-    detached: process.platform !== "win32",
+    // Do not detach when launched via ComSpec — tree is cmd + script.
+    detached: process.platform !== "win32" && !target.via_comspec,
     stdio: ["ignore", "pipe", "pipe"],
   });
 

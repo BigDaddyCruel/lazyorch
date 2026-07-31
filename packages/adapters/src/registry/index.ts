@@ -66,4 +66,6 @@ export {
   GenericAdapterError,
   createGenericAdapter,
   splitTemplateArgv,
+  templateToArgv,
+  type TemplateVars,
 } from "./generic.js";

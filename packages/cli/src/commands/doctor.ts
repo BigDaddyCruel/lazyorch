@@ -284,7 +284,7 @@ async function checkAdapters(
         code: `adapter_${row.id}`,
         message: `adapter ${row.id}: found (${row.binary_path ?? row.binary ?? "?"})`,
       });
-    } else if (row.status === "unbound" || row.status === "missing") {
+    } else if (row.status === "unbound") {
       findings.push({
         level: "warn",
         code: `adapter_${row.id}_missing`,

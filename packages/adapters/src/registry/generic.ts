@@ -8,7 +8,6 @@
 
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { substituteStartTemplate } from "../runner/materialize.js";
 import { scrubEnv } from "../scrub.js";
 import type {
   AgentAdapter,
@@ -48,9 +47,22 @@ interface LiveEntry {
   run_handle: string;
 }
 
+export interface TemplateVars {
+  cwd: string;
+  model: string;
+  prompt_file: string;
+  session_dir: string;
+  timeout_ms: number | string;
+  binary?: string;
+  args_prefix?: readonly string[];
+  agent_id?: string;
+  task_id?: string;
+}
+
 /**
- * Split a substituted start template into argv.
- * Simple whitespace split; supports double-quoted segments.
+ * Split a template string into argv tokens (respects quotes in the template).
+ * Does **not** expand placeholders — use {@link templateToArgv} for path-safe
+ * substitution (values with spaces stay single argv entries).
  */
 export function splitTemplateArgv(command: string): string[] {
   const out: string[] = [];
@@ -63,6 +75,55 @@ export function splitTemplateArgv(command: string): string[] {
     }
   }
   return out;
+}
+
+/**
+ * Build argv from start_template without re-splitting substituted values.
+ * Tokens the template as whitespace/quoted segments first, then replaces
+ * `{placeholder}` wholly or in-place — so `C:\Program Files\...` stays one arg.
+ */
+export function templateToArgv(
+  template: string,
+  vars: TemplateVars,
+): string[] {
+  const map: Record<string, string> = {
+    "{cwd}": vars.cwd,
+    "{model}": vars.model,
+    "{prompt_file}": vars.prompt_file,
+    "{session_dir}": vars.session_dir,
+    "{timeout_ms}": String(vars.timeout_ms),
+    "{binary}": vars.binary ?? "",
+    "{args_prefix}": (vars.args_prefix ?? []).join(" "),
+    "{agent_id}": vars.agent_id ?? "",
+    "{task_id}": vars.task_id ?? "",
+  };
+
+  const rawTokens = splitTemplateArgv(template);
+  const argv: string[] = [];
+
+  for (const tok of rawTokens) {
+    // Whole-token placeholder: expand {args_prefix} to multiple argv entries.
+    if (tok === "{args_prefix}") {
+      for (const a of vars.args_prefix ?? []) {
+        if (a.length > 0) argv.push(a);
+      }
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(map, tok)) {
+      argv.push(map[tok] ?? "");
+      continue;
+    }
+    // In-token substitution (e.g. --prompt={prompt_file}) — no re-split.
+    let out = tok;
+    for (const [ph, val] of Object.entries(map)) {
+      if (out.includes(ph)) {
+        out = out.split(ph).join(val);
+      }
+    }
+    argv.push(out);
+  }
+
+  return argv;
 }
 
 export class GenericCliAdapter implements AgentAdapter {
@@ -113,18 +174,9 @@ export class GenericCliAdapter implements AgentAdapter {
     }
 
     const binary = this.reg.binary_path ?? this.reg.binary;
-    const prompt_file = session.prompt_file ?? join(session.session_dir, "prompt.md");
-    const templateVars: {
-      cwd: string;
-      model: string;
-      prompt_file: string;
-      session_dir: string;
-      timeout_ms: number;
-      binary?: string;
-      args_prefix?: readonly string[];
-      agent_id?: string;
-      task_id?: string;
-    } = {
+    const prompt_file =
+      session.prompt_file ?? join(session.session_dir, "prompt.md");
+    const templateVars: TemplateVars = {
       cwd: session.cwd,
       model: session.model,
       prompt_file,
@@ -135,19 +187,17 @@ export class GenericCliAdapter implements AgentAdapter {
     };
     if (this.reg.args_prefix) templateVars.args_prefix = this.reg.args_prefix;
     if (session.task_id !== undefined) templateVars.task_id = session.task_id;
-    const substituted = substituteStartTemplate(
-      this.reg.start_template,
-      templateVars,
-    );
 
-    let argv = splitTemplateArgv(substituted);
-    // If template did not include {binary}, prepend resolved binary + args_prefix.
+    // Path-safe: tokenize template first, then substitute (no re-split of paths).
+    let argv = templateToArgv(this.reg.start_template, templateVars);
     if (argv.length === 0) {
-      throw new GenericAdapterError("empty_argv", "start_template produced empty argv");
+      throw new GenericAdapterError(
+        "empty_argv",
+        "start_template produced empty argv",
+      );
     }
     // Ensure binary is first token when template is args-only.
     if (
-      this.reg.start_template &&
       !this.reg.start_template.includes("{binary}") &&
       argv[0] !== binary
     ) {

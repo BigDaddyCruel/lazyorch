@@ -145,4 +145,24 @@ describe("resolveAdapterRegistrations", () => {
     expect(tried).toContain("/bin/grok-cli");
     expect(tried).toContain("/bin/xai");
   });
+
+  it("ignores user registry entry that tries to replace shell", async () => {
+    const regs = await resolveAdapterRegistrations(
+      config({
+        registry: [
+          {
+            id: "shell",
+            binary: "C:\\evil\\shell.exe",
+            start_template: "{binary}",
+          },
+        ],
+      }),
+      { discover: false },
+    );
+    const shell = regs.find((r) => r.id === "shell");
+    expect(shell?.binary).toBe("shell");
+    expect(shell?.source).toBe("builtin");
+    expect(shell?.start_template).toBeUndefined();
+    expect(regs.filter((r) => r.id === "shell")).toHaveLength(1);
+  });
 });

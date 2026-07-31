@@ -32,6 +32,21 @@ describe("resolveBinary / discoverBinary", () => {
     expect(resolved?.replace(/\\/g, "/")).toBe("C:/bin/agy.EXE");
   });
 
+  it("prefers PATHEXT (.cmd) over extensionless npm shim on win32", async () => {
+    // Fake exists is case-sensitive; PATHEXT entries are typically uppercased.
+    const present = new Set([
+      "C:\\npm\\claude",
+      "C:\\npm\\claude.CMD",
+    ]);
+    const resolved = await resolveBinary("claude", {
+      platform: "win32",
+      env: { PATH: "C:\\npm", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+      exists: async (p) => present.has(p),
+    });
+    // CreateProcess/where order: PATHEXT before bare name.
+    expect(resolved).toBe("C:\\npm\\claude.CMD");
+  });
+
   it("searches PATH on posix", async () => {
     const resolved = await resolveBinary("claude", {
       platform: "linux",

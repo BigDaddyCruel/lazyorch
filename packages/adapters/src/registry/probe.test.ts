@@ -89,4 +89,26 @@ describe("probeAdapter", () => {
     expect(d.ok).toBe(true);
     expect(d.message).toMatch(/disabled/);
   });
+
+  it("timeout (code null) is not healthy", async () => {
+    const exec: ExecImpl = async () => ({
+      code: null,
+      stdout: "",
+      stderr: "version probe timed out",
+    });
+    const d = await probeAdapter(reg(), { exec });
+    expect(d.ok).toBe(false);
+    expect(d.message).toMatch(/timed out|killed/i);
+  });
+
+  it("timeout with partial version token is still failure", async () => {
+    const exec: ExecImpl = async () => ({
+      code: null,
+      stdout: "claude 1.2.3",
+      stderr: "version probe timed out",
+    });
+    const d = await probeAdapter(reg(), { exec });
+    expect(d.ok).toBe(false);
+    expect(d.version).toBe("1.2.3");
+  });
 });

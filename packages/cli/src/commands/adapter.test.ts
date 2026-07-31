@@ -113,4 +113,44 @@ describe("runAdapter CLI", () => {
     });
     expect(noBin.exitCode).toBe(1);
   });
+
+  it("refuses to register shell id", async () => {
+    const root = await tempRoot();
+    await runInit({ repo: root, name: "demo", stdout: silent() });
+    const result = await runAdapter({
+      action: "register",
+      repo: root,
+      id: "shell",
+      binary: "cmd.exe",
+      stdout: silent(),
+      stderr: silent(),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.message).toMatch(/reserved/i);
+  });
+
+  it("test unbound coding adapter exits 0 with warn semantics", async () => {
+    const root = await tempRoot();
+    await runInit({ repo: root, name: "demo", stdout: silent() });
+    // Register a CLI that cannot resolve on PATH → unbound (soft).
+    await runAdapter({
+      action: "register",
+      repo: root,
+      id: "nonesuch-cli",
+      binary: "nonesuch-cli-zzz-not-on-path",
+      startTemplate: "{binary} {prompt_file}",
+      stdout: silent(),
+      stderr: silent(),
+    });
+    const result = await runAdapter({
+      action: "test",
+      repo: root,
+      id: "nonesuch-cli",
+      stdout: silent(),
+      stderr: silent(),
+    });
+    // Unbound is soft (aligned with doctor); only hard probe errors fail.
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toMatch(/unbound/i);
+  });
 });

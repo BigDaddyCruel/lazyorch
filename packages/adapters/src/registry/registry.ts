@@ -115,15 +115,15 @@ export class AdapterRegistry {
 
   /**
    * Create a runtime AgentAdapter.
-   * - shell → ShellAdapter
+   * - shell → ShellAdapter (always; ignores registry overlays)
    * - others with start_template → GenericCliAdapter (thin; PR-09 deepens builtins)
    * - unbound / no template → null
    */
   createAdapter(id: string): AgentAdapter | null {
-    const reg = this.get(id);
-    if (!reg || !reg.enabled) return null;
-
+    // Shell is hard-wired: never GenericCliAdapter, never null due to overlay.
     if (id === "shell") {
+      const reg = this.get("shell");
+      if (reg && !reg.enabled) return null;
       if (!this.shellAdapter) {
         const shellOpts: ShellAdapterOptions = {
           ...(this.options.shell ?? {}),
@@ -133,6 +133,9 @@ export class AdapterRegistry {
       }
       return this.shellAdapter;
     }
+
+    const reg = this.get(id);
+    if (!reg || !reg.enabled) return null;
 
     if (reg.unbound) return null;
     if (!reg.start_template) return null;

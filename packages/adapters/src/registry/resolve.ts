@@ -220,10 +220,13 @@ async function resolveUserRegistry(
   const doDiscover = options.discover !== false;
 
   for (const entry of config.registry) {
+    // Shell is reserved — never replace the deterministic builtin row.
+    if (entry.id === "shell") {
+      continue;
+    }
     const reg = await resolveUserEntry(entry, options, doDiscover, config);
     // User registry may override a builtin id (re-bind agy/grok etc.).
-    if (existingIds.has(reg.id) && isBuiltinAdapterId(reg.id) && reg.id !== "shell") {
-      // Caller merges by replacing; mark source user_config.
+    if (existingIds.has(reg.id) && isBuiltinAdapterId(reg.id)) {
       reg.source = "user_config";
     }
     out.push(reg);
@@ -339,7 +342,8 @@ async function resolveUserEntry(
 
 /**
  * Build the full resolved registration list.
- * User registry entries with the same id as a builtin **replace** the builtin row.
+ * User registry entries with the same id as a builtin **replace** the builtin row,
+ * except **shell** which is always the dedicated deterministic registration.
  */
 export async function resolveAdapterRegistrations(
   config: AdaptersConfig,
@@ -348,6 +352,7 @@ export async function resolveAdapterRegistrations(
   const builtins = await resolveBuiltin(config, options);
   const byId = new Map<string, AdapterRegistration>();
   for (const b of builtins) byId.set(b.id, b);
+  const shellBuiltin = byId.get("shell");
 
   const user = await resolveUserRegistry(
     config,
@@ -355,7 +360,13 @@ export async function resolveAdapterRegistrations(
     new Set(byId.keys()),
   );
   for (const u of user) {
+    if (u.id === "shell") continue;
     byId.set(u.id, u);
+  }
+
+  // Always restore dedicated shell row after merge.
+  if (shellBuiltin) {
+    byId.set("shell", shellBuiltin);
   }
 
   // Stable order: builtins first (catalog order), then remaining user ids.

@@ -36,7 +36,12 @@ export interface AdapterCommandOptions {
   capabilitiesJson?: string;
   /** When true, list only enabled. */
   enabledOnly?: boolean;
-  /** Skip version exec (resolve-only). */
+  /**
+   * When true, list runs live version probes (default false — resolve-only).
+   * `adapter test` always probes.
+   */
+  probe?: boolean;
+  /** @deprecated Prefer default resolve-only list; use probe:true to opt in. */
   skipProbe?: boolean;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -116,6 +121,19 @@ export async function runAdapter(
   }
 }
 
+/**
+ * Classify doctor/probe outcome for CLI exit codes.
+ * Unbound / disabled → warn (exit 0); hard probe failures → fail (exit 1).
+ */
+export function classifyProbeExit(d: {
+  ok: boolean;
+  unbound?: boolean;
+}): { tag: string; exitCode: number; soft: boolean } {
+  if (d.ok) return { tag: "ok  ", exitCode: 0, soft: false };
+  if (d.unbound) return { tag: "WARN", exitCode: 0, soft: true };
+  return { tag: "FAIL", exitCode: 1, soft: false };
+}
+
 async function listAdapters(
   repo: string,
   options: AdapterCommandOptions,
@@ -123,8 +141,9 @@ async function listAdapters(
 ): Promise<AdapterCommandResult> {
   const { config } = await loadConfig(repo);
   const registry = await AdapterRegistry.fromConfig(config.adapters);
+  // Default resolve-only (no version spawn). Opt in with --probe.
   const matrix = await registry.healthMatrix({
-    skip_version_probe: options.skipProbe === true,
+    skip_version_probe: options.probe !== true,
   });
 
   let rows = matrix.adapters;
@@ -143,6 +162,11 @@ async function listAdapters(
         ? "; coding adapter available\n"
         : "; no healthy coding adapter (shell only or unbound)\n"),
   );
+  if (!options.probe) {
+    stdout.write(
+      "(resolve-only; pass --probe for live version checks, or use adapter test)\n",
+    );
+  }
 
   return { exitCode: 0, action: "list", matrix };
 }
@@ -156,12 +180,20 @@ async function registerAdapter(
   if (!id) {
     throw new Error("adapter register requires --id <id>");
   }
+  if (id === "shell") {
+    throw new Error(
+      'adapter id "shell" is reserved for the deterministic shell adapter; cannot register',
+    );
+  }
   const binary = options.binary?.trim();
   if (!binary) {
     throw new Error("adapter register requires --binary <path-or-name>");
   }
 
   const { config, configPath } = await loadConfig(repo);
+
+  const builtinIds = new Set(["claude", "codex", "agy", "grok"]);
+  const isBuiltin = builtinIds.has(id);
 
   let capabilities: AdapterRegistryEntry["capabilities"];
   if (options.capabilitiesJson) {
@@ -183,6 +215,13 @@ async function registerAdapter(
   if (options.displayName) entryInput.display_name = options.displayName;
   if (options.startTemplate) entryInput.start_template = options.startTemplate;
   if (capabilities) entryInput.capabilities = capabilities;
+
+  // Non-builtin without start_template cannot be started via createAdapter.
+  if (!isBuiltin && !options.startTemplate) {
+    stdout.write(
+      `warn: no --start-template for "${id}"; adapter will be discoverable but not startable until a template is set\n`,
+    );
+  }
 
   const entry = AdapterRegistryEntrySchema.parse(entryInput);
 
@@ -211,12 +250,17 @@ async function registerAdapter(
 
   const resolved = await AdapterRegistry.fromConfig(next.adapters);
   const reg = resolved.get(id);
+  const canStart = Boolean(
+    reg && reg.enabled && !reg.unbound && reg.start_template,
+  );
 
   stdout.write(
     `registered adapter ${id} → ${binary}` +
       (reg?.binary_path
         ? ` (resolved: ${reg.binary_path})`
         : " (unbound until found on PATH)") +
+      `\n      matrix.start=${canStart}` +
+      (canStart ? "" : " (needs bound binary + start_template)") +
       `\nwrote ${configPath}\n`,
   );
 
@@ -249,9 +293,10 @@ async function testAdapter(
     if (!d) {
       throw new Error(`no doctor result for ${id}`);
     }
-    const tag = d.ok ? "ok  " : "FAIL";
+    // Align with doctor: unbound is WARN (exit 0); hard probe errors fail.
+    const classified = classifyProbeExit(d);
     stdout.write(
-      `${tag}  ${d.adapter_id}: ${d.message}` +
+      `${classified.tag}  ${d.adapter_id}: ${d.message}` +
         (d.binary_path ? ` [${d.binary_path}]` : "") +
         (d.version ? ` version=${d.version}` : "") +
         "\n",
@@ -264,7 +309,7 @@ async function testAdapter(
       );
     }
     const out: AdapterCommandResult = {
-      exitCode: d.ok ? 0 : 1,
+      exitCode: classified.exitCode,
       action: "test",
       matrix,
       message: d.message,
@@ -285,7 +330,7 @@ async function testAdapter(
             ? "WARN"
             : "FAIL";
     stdout.write(`${tag}  ${formatRow(row)}\n`);
-    if (row.status === "error" || row.status === "missing") failed += 1;
+    if (row.status === "error") failed += 1;
   }
   stdout.write(
     `\ntest: ${matrix.healthy_count} ok, ${matrix.adapters.filter((a) => a.status === "unbound").length} unbound, ${failed} error(s)\n`,

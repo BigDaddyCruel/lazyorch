@@ -73,7 +73,6 @@ export type AdapterHealthStatus =
   | "ok"
   | "disabled"
   | "unbound"
-  | "missing"
   | "error";
 
 /** One row of the capability / health matrix. */

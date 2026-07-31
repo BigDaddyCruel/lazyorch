@@ -118,6 +118,7 @@ export {
   GenericAdapterError,
   createGenericAdapter,
   splitTemplateArgv,
+  templateToArgv,
   type AdapterCapabilities,
   type AdapterRegistration,
   type AdapterHealthRow,
@@ -136,4 +137,12 @@ export {
   type ResolveRegistryOptions,
   type HealthOptions,
   type AdapterRegistryOptions,
+  type TemplateVars,
 } from "./registry/index.js";
+
+export {
+  resolveSpawnTarget,
+  isWindowsShellScript,
+  quoteWindowsArg,
+  type ResolvedSpawnTarget,
+} from "./spawn-policy.js";

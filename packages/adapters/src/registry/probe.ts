@@ -4,6 +4,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { resolveSpawnTarget } from "../spawn-policy.js";
 import type { DoctorResult } from "../types.js";
 import type { AdapterRegistration } from "./types.js";
 
@@ -27,6 +28,7 @@ export interface ProbeOptions {
 
 /**
  * Default spawn-based exec. Captures stdout/stderr; kills on timeout.
+ * Windows .cmd/.bat/.ps1 run via ComSpec (shared spawn policy).
  */
 export function defaultExecImpl(
   binary: string,
@@ -42,9 +44,10 @@ export function defaultExecImpl(
       resolve(result);
     };
 
+    const target = resolveSpawnTarget(binary, args);
     let child;
     try {
-      child = spawn(binary, [...args], {
+      child = spawn(target.file, target.args, {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: process.env,
@@ -181,7 +184,19 @@ export async function probeAdapter(
     const result = await exec(binary, versionArgs, { timeout_ms });
     const version = parseVersionString(result.stdout || result.stderr);
 
-    if (result.code !== 0 && result.code !== null) {
+    // Timeout / signal-kill: code null. Never report healthy without a version.
+    if (result.code === null) {
+      return {
+        ok: false,
+        adapter_id: reg.id,
+        binary_path: reg.binary_path ?? binary,
+        message: `adapter ${reg.id}: version probe timed out or was killed: ${(result.stderr || result.stdout).trim().slice(0, 200) || "no output"}`,
+        capabilities_probe: capsProbe(reg),
+        ...(version ? { version } : {}),
+      };
+    }
+
+    if (result.code !== 0) {
       // Some CLIs exit non-zero on --version but still print useful text.
       if (!version) {
         return {
