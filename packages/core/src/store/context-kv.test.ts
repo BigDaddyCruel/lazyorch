@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   CONTEXT_KEY_MAX_LEN,
+  CONTEXT_MAX_KEYS,
+  CONTEXT_MAX_KV_BYTES,
   CONTEXT_VALUE_MAX_BYTES,
   ContextKvError,
   assertCanWriteContext,
+  assertContextQuota,
   assertValidContextKey,
   assertValidContextValue,
   canWriteContext,
@@ -58,6 +61,34 @@ describe("context-kv values", () => {
   it("rejects oversized values", () => {
     const big = "x".repeat(CONTEXT_VALUE_MAX_BYTES + 1);
     expect(() => assertValidContextValue(big)).toThrow(ContextKvError);
+  });
+
+  it("enforces key count and total kv size quotas", () => {
+    const tooMany: Record<string, unknown> = {};
+    for (let i = 0; i < CONTEXT_MAX_KEYS + 1; i++) {
+      tooMany[`k${i}`] = 1;
+    }
+    expect(() => assertContextQuota(tooMany)).toThrow(ContextKvError);
+    try {
+      assertContextQuota(tooMany);
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContextKvError);
+      expect((err as ContextKvError).code).toBe("quota_exceeded");
+    }
+
+    // Overwrite existing key does not trip max keys when already at limit
+    let ctx = emptyRunContext("run_q");
+    for (let i = 0; i < CONTEXT_MAX_KEYS; i++) {
+      ctx = setContextValue(ctx, `k${i}`, i);
+    }
+    expect(() => setContextValue(ctx, "k0", "overwrite")).not.toThrow();
+    expect(() => setContextValue(ctx, "extra", 1)).toThrow(ContextKvError);
+
+    // Document size cap
+    const fat: Record<string, unknown> = {
+      blob: "y".repeat(CONTEXT_MAX_KV_BYTES),
+    };
+    expect(() => assertContextQuota(fat)).toThrow(ContextKvError);
   });
 });
 

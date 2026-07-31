@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import {
   ContextKvError,
   StateStore,
+  assertValidContextKey,
   getContextValue,
   listContextKeys,
   type RunContext,
@@ -117,6 +118,7 @@ export async function runContext(options: ContextOptions): Promise<ContextResult
           stderr.write("error: context get requires <key>\n");
           return { exitCode: 2, action: "get", runId, message: "missing key" };
         }
+        assertValidContextKey(key);
         const ctx = await store.loadOrEmptyContext(runId);
         if (!Object.prototype.hasOwnProperty.call(ctx.kv, key)) {
           stderr.write(`error: context key not found: ${key}\n`);
@@ -142,6 +144,7 @@ export async function runContext(options: ContextOptions): Promise<ContextResult
           stderr.write("error: context set requires <key> <value>\n");
           return { exitCode: 2, action: "set", runId, key, message: "missing value" };
         }
+        assertValidContextKey(key);
         const value = parseSetValue(options.value);
         const ctx = await store.setContextKey(runId, key, value);
         writeJson(
@@ -157,6 +160,7 @@ export async function runContext(options: ContextOptions): Promise<ContextResult
           stderr.write("error: context delete requires <key>\n");
           return { exitCode: 2, action: "delete", runId, message: "missing key" };
         }
+        assertValidContextKey(key);
         const deleted = await store.deleteContextKey(runId, key);
         if (!deleted) {
           stderr.write(`error: context key not found: ${key}\n`);

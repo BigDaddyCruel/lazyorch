@@ -3,19 +3,20 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
-import { SCHEMA_VERSION, StateStore } from "@lazyorch/core";
+import { SCHEMA_VERSION, StateStore, ContextKvError } from "@lazyorch/core";
 import { ProjectRegistry } from "./project-registry.js";
 import {
   matchContextPath,
   parseActorRoleSafe,
+  resolveWriteActor,
   resolveRunContextStore,
   loadWorkerWrite,
   putContextKey,
   deleteContextKey,
   listContextResponse,
   getContextResponse,
+  withContextWriteLock,
 } from "./context-routes.js";
-import { ContextKvError } from "@lazyorch/core";
 
 const temps: string[] = [];
 
@@ -49,12 +50,35 @@ describe("matchContextPath", () => {
   });
 });
 
-describe("parseActorRoleSafe", () => {
-  it("defaults to human and validates", () => {
-    expect(parseActorRoleSafe(undefined)).toEqual({ ok: true, role: "human" });
-    expect(parseActorRoleSafe("lead")).toEqual({ ok: true, role: "lead" });
-    expect(parseActorRoleSafe("WORKER")).toEqual({ ok: true, role: "worker" });
-    expect(parseActorRoleSafe("nope").ok).toBe(false);
+describe("parseActorRoleSafe / resolveWriteActor", () => {
+  it("defaults to human only with bearer", () => {
+    expect(parseActorRoleSafe(undefined, { bearerOk: true })).toEqual({
+      ok: true,
+      role: "human",
+    });
+    expect(parseActorRoleSafe(undefined, { bearerOk: false }).ok).toBe(false);
+    expect(parseActorRoleSafe("lead", { bearerOk: true })).toEqual({
+      ok: true,
+      role: "lead",
+    });
+    expect(parseActorRoleSafe("WORKER", { bearerOk: true })).toEqual({
+      ok: true,
+      role: "worker",
+    });
+    expect(parseActorRoleSafe("nope", { bearerOk: true }).ok).toBe(false);
+  });
+
+  it("resolveWriteActor requires bearer", () => {
+    expect(resolveWriteActor(undefined, false).ok).toBe(false);
+    if (!resolveWriteActor(undefined, false).ok) {
+      expect(resolveWriteActor(undefined, false).status).toBe(401);
+    }
+    const ok = resolveWriteActor(undefined, true);
+    expect(ok).toEqual({ ok: true, role: "human" });
+    expect(resolveWriteActor("worker", true)).toEqual({
+      ok: true,
+      role: "worker",
+    });
   });
 });
 
@@ -84,12 +108,13 @@ describe("context routes persistence + ACL", () => {
     });
 
     const resolved = await resolveRunContextStore(registry, runId);
-    expect(resolved?.project.id).toBe("proj_ctx");
-    expect(resolved?.runId).toBe(runId);
+    expect(resolved.status).toBe("ok");
+    if (resolved.status !== "ok") return;
+    expect(resolved.resolved.project.id).toBe("proj_ctx");
+    expect(resolved.resolved.runId).toBe(runId);
 
-    // lead can write
     const afterPut = await putContextKey(
-      resolved!.store,
+      resolved.resolved.store,
       runId,
       "port",
       9000,
@@ -102,27 +127,101 @@ describe("context routes persistence + ACL", () => {
     expect(listed.keys).toEqual(["port"]);
     expect(getContextResponse(afterPut, "port").value).toBe(9000);
 
-    // worker blocked by default
     await expect(
-      putContextKey(resolved!.store, runId, "x", 1, "worker", false),
+      putContextKey(resolved.resolved.store, runId, "x", 1, "worker", false),
     ).rejects.toBeInstanceOf(ContextKvError);
 
-    // worker allowed when worker_write
-    await putContextKey(resolved!.store, runId, "worker_flag", true, "worker", true);
+    await putContextKey(
+      resolved.resolved.store,
+      runId,
+      "worker_flag",
+      true,
+      "worker",
+      true,
+    );
 
-    // reviewer always blocked
     await expect(
-      putContextKey(resolved!.store, runId, "y", 1, "reviewer", true),
+      putContextKey(resolved.resolved.store, runId, "y", 1, "reviewer", true),
     ).rejects.toBeInstanceOf(ContextKvError);
 
     const del = await deleteContextKey(
-      resolved!.store,
+      resolved.resolved.store,
       runId,
       "port",
       "human",
       false,
     );
     expect(del.deleted).toBe(true);
+  });
+
+  it("returns ambiguous when run id collides across projects", async () => {
+    const home = await tempDir("lazyorch-ctx-amb-home-");
+    const repoA = await tempDir("lazyorch-ctx-amb-a-");
+    const repoB = await tempDir("lazyorch-ctx-amb-b-");
+    const registry = new ProjectRegistry(home);
+    await registry.register({ id: "proj_a", repo_root: repoA });
+    await registry.register({ id: "proj_b", repo_root: repoB });
+
+    const runId = "run_collide";
+    for (const [repo, proj] of [
+      [repoA, "proj_a"],
+      [repoB, "proj_b"],
+    ] as const) {
+      const store = new StateStore(join(repo, ".lazyorch"));
+      await store.writeRun({
+        schema_version: SCHEMA_VERSION,
+        id: runId,
+        project_id: proj,
+        phase: "Inception",
+        idea: "x",
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      });
+    }
+
+    const amb = await resolveRunContextStore(registry, runId);
+    expect(amb.status).toBe("ambiguous");
+    if (amb.status === "ambiguous") {
+      expect(amb.project_ids).toEqual(["proj_a", "proj_b"]);
+    }
+
+    const pinned = await resolveRunContextStore(registry, runId, "proj_b");
+    expect(pinned.status).toBe("ok");
+    if (pinned.status === "ok") {
+      expect(pinned.resolved.project.id).toBe("proj_b");
+    }
+  });
+
+  it("serializes concurrent writes for the same run", async () => {
+    const home = await tempDir("lazyorch-ctx-lock-home-");
+    const repo = await tempDir("lazyorch-ctx-lock-repo-");
+    const registry = new ProjectRegistry(home);
+    await registry.register({ id: "proj_lock", repo_root: repo });
+    const store = new StateStore(join(repo, ".lazyorch"));
+    const runId = "run_lock";
+    await store.writeRun({
+      schema_version: SCHEMA_VERSION,
+      id: runId,
+      project_id: "proj_lock",
+      phase: "Implementing",
+      idea: "lock",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        withContextWriteLock(runId, () =>
+          store.setContextKey(runId, `k${i}`, i),
+        ),
+      ),
+    );
+
+    const ctx = await store.readContext(runId);
+    expect(Object.keys(ctx?.kv ?? {}).length).toBe(20);
+    for (let i = 0; i < 20; i++) {
+      expect(ctx?.kv[`k${i}`]).toBe(i);
+    }
   });
 
   it("loadWorkerWrite reads config.yml", async () => {

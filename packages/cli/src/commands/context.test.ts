@@ -150,5 +150,17 @@ describe("runContext", () => {
       stderr: streams.stderr,
     });
     expect(missingKey.exitCode).toBe(1);
+
+    // invalid key → validation (exit 2), not not_found
+    const badKey = await runContext({
+      action: "get",
+      run: "run_ok",
+      key: "has space",
+      repo: root,
+      stdout: streams.stdout,
+      stderr: streams.stderr,
+    });
+    expect(badKey.exitCode).toBe(2);
+    expect(badKey.message).toBe("invalid_key");
   });
 });

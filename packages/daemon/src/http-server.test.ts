@@ -225,6 +225,7 @@ describe("daemon HTTP stubs", () => {
   it("context KV GET/PUT/DELETE with write ACL", async () => {
     const home = await tempHome();
     const { base, serve } = await listenEphemeral(home);
+    const auth = { Authorization: `Bearer ${serve.token}` };
 
     const repo = join(home, "ctx-repo");
     await mkdir(repo, { recursive: true });
@@ -251,16 +252,24 @@ describe("daemon HTTP stubs", () => {
       updated_at: "2026-01-01T00:00:00.000Z",
     });
 
-    // list empty
+    // list empty (read remains open on loopback)
     const listEmpty = await fetch(`${base}/v1/runs/${runId}/context`);
     expect(listEmpty.status).toBe(200);
     const listEmptyBody = (await listEmpty.json()) as { keys: string[] };
     expect(listEmptyBody.keys).toEqual([]);
 
-    // human (default) can set
-    const put = await fetch(`${base}/v1/runs/${runId}/context/port`, {
+    // write without Bearer → 401
+    const noAuth = await fetch(`${base}/v1/runs/${runId}/context/port`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 7420 }),
+    });
+    expect(noAuth.status).toBe(401);
+
+    // human (default with Bearer) can set
+    const put = await fetch(`${base}/v1/runs/${runId}/context/port`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify({ value: 7420 }),
     });
     expect(put.status).toBe(200);
@@ -273,7 +282,7 @@ describe("daemon HTTP stubs", () => {
       `${base}/v1/runs/${runId}/context/model_pin/worker`,
       {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...auth },
         body: JSON.stringify({ value: "claude" }),
       },
     );
@@ -288,11 +297,12 @@ describe("daemon HTTP stubs", () => {
     const listBody = (await list.json()) as { keys: string[] };
     expect(listBody.keys).toEqual(["model_pin/worker", "port"]);
 
-    // worker forbidden by default
+    // worker forbidden by default (with Bearer + role claim)
     const workerPut = await fetch(`${base}/v1/runs/${runId}/context/x`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
+        ...auth,
         "X-LazyOrch-Actor-Role": "worker",
       },
       body: JSON.stringify({ value: 1 }),
@@ -304,15 +314,22 @@ describe("daemon HTTP stubs", () => {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
+        ...auth,
         "X-LazyOrch-Actor-Role": "lead",
       },
       body: JSON.stringify({ value: true }),
     });
     expect(leadPut.status).toBe(200);
 
-    // delete
+    // delete requires Bearer
+    const delNoAuth = await fetch(`${base}/v1/runs/${runId}/context/port`, {
+      method: "DELETE",
+    });
+    expect(delNoAuth.status).toBe(401);
+
     const del = await fetch(`${base}/v1/runs/${runId}/context/port`, {
       method: "DELETE",
+      headers: auth,
     });
     expect(del.status).toBe(200);
     const getMissing = await fetch(`${base}/v1/runs/${runId}/context/port`);

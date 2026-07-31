@@ -41,6 +41,15 @@ export const CONTEXT_KEY_MAX_LEN = 256;
 /** Max JSON-serialized value size (bytes, UTF-8). */
 export const CONTEXT_VALUE_MAX_BYTES = 16 * 1024;
 
+/** Max number of keys in a single run context document. */
+export const CONTEXT_MAX_KEYS = 512;
+
+/**
+ * Max UTF-8 size of the full `kv` object when JSON-serialized
+ * (keeps the "small durable store" budget).
+ */
+export const CONTEXT_MAX_KV_BYTES = 128 * 1024;
+
 /**
  * Allowed key pattern: namespaced segments with `/` (e.g. `model_pin/worker`).
  * Alphanumerics, `_`, `-`, `.` per segment; no empty segments, no `..`.
@@ -52,6 +61,7 @@ export class ContextKvError extends Error {
     | "invalid_key"
     | "invalid_value"
     | "value_too_large"
+    | "quota_exceeded"
     | "forbidden"
     | "not_found";
 
@@ -196,6 +206,35 @@ export function getContextValue(
 }
 
 /**
+ * Enforce document-level quotas on a prospective `kv` map.
+ */
+export function assertContextQuota(nextKv: Record<string, unknown>): void {
+  const keyCount = Object.keys(nextKv).length;
+  if (keyCount > CONTEXT_MAX_KEYS) {
+    throw new ContextKvError(
+      "quota_exceeded",
+      `context exceeds max keys (${CONTEXT_MAX_KEYS})`,
+    );
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(nextKv);
+  } catch {
+    throw new ContextKvError(
+      "invalid_value",
+      "context kv must be JSON-serializable",
+    );
+  }
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes > CONTEXT_MAX_KV_BYTES) {
+    throw new ContextKvError(
+      "quota_exceeded",
+      `context kv exceeds ${CONTEXT_MAX_KV_BYTES} bytes`,
+    );
+  }
+}
+
+/**
  * Pure set: returns new document with key updated.
  */
 export function setContextValue(
@@ -206,11 +245,13 @@ export function setContextValue(
 ): RunContext {
   assertValidContextKey(key);
   assertValidContextValue(value);
+  const kv = { ...ctx.kv, [key]: value };
+  assertContextQuota(kv);
   return {
     ...ctx,
     schema_version: SCHEMA_VERSION,
     updated_at: now,
-    kv: { ...ctx.kv, [key]: value },
+    kv,
   };
 }
 

@@ -76,6 +76,7 @@ export {
 export {
   createDaemonHttpServer,
   tokensEqual,
+  hasValidBearer,
   readBody,
   MAX_BODY_BYTES,
   type DaemonHttpContext,
@@ -87,6 +88,8 @@ export {
 export {
   resolveRunContextStore,
   parseActorRoleSafe,
+  resolveWriteActor,
+  withContextWriteLock,
   loadWorkerWrite,
   matchContextPath,
   listContextResponse,
@@ -95,6 +98,7 @@ export {
   deleteContextKey,
   contextHttpStatus,
   type ResolvedRunContext,
+  type ResolveRunContextResult,
 } from "./context-routes.js";
 
 // --- serve ---

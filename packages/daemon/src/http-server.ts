@@ -26,9 +26,10 @@ import {
   listContextResponse,
   loadWorkerWrite,
   matchContextPath,
-  parseActorRoleSafe,
   putContextKey,
   resolveRunContextStore,
+  resolveWriteActor,
+  withContextWriteLock,
 } from "./context-routes.js";
 
 /** Max JSON body size for stub POSTs (bytes). */
@@ -146,6 +147,21 @@ export function tokensEqual(a: string, b: string): boolean {
   return timingSafeEqual(ba, bb);
 }
 
+/**
+ * True when Authorization carries a valid Bearer matching the daemon token.
+ * Independent of loopback optional-auth policy (used for context write ACL).
+ */
+export function hasValidBearer(
+  req: IncomingMessage,
+  token: string,
+): boolean {
+  const header = req.headers.authorization;
+  if (!header) return false;
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (!m || m[1] === undefined) return false;
+  return tokensEqual(m[1], token);
+}
+
 function checkAuth(
   req: IncomingMessage,
   ctx: DaemonHttpContext,
@@ -163,11 +179,7 @@ function checkAuth(
 
   if (!forceAuth) return true;
 
-  const header = req.headers.authorization;
-  if (!header) return false;
-  const m = /^Bearer\s+(.+)$/i.exec(header);
-  if (!m || m[1] === undefined) return false;
-  return tokensEqual(m[1], ctx.token);
+  return hasValidBearer(req, ctx.token);
 }
 
 function applyCors(req: IncomingMessage, res: ServerResponse): void {
@@ -178,7 +190,7 @@ function applyCors(req: IncomingMessage, res: ServerResponse): void {
     res.setHeader("Vary", "Origin");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Authorization, Content-Type, Last-Event-ID",
+      "Authorization, Content-Type, Last-Event-ID, X-LazyOrch-Actor-Role",
     );
     res.setHeader(
       "Access-Control-Allow-Methods",
@@ -475,12 +487,12 @@ async function handleContextRequest(
   match: { runId: string; key?: string },
 ): Promise<void> {
   const projectId = url.searchParams.get("project") ?? undefined;
-  const resolved = await resolveRunContextStore(
+  const resolveResult = await resolveRunContextStore(
     ctx.registry,
     match.runId,
     projectId,
   );
-  if (!resolved) {
+  if (resolveResult.status === "not_found") {
     sendJson(res, 404, {
       error: "run_not_found",
       message: `run not found: ${match.runId}`,
@@ -489,12 +501,16 @@ async function handleContextRequest(
     });
     return;
   }
-
-  const actor = parseActorRoleSafe(req.headers["x-lazyorch-actor-role"]);
-  if (!actor.ok) {
-    sendJson(res, 400, { error: "invalid_actor_role", message: actor.message });
+  if (resolveResult.status === "ambiguous") {
+    sendJson(res, 409, {
+      error: "ambiguous_run",
+      message: `run id exists in multiple projects; pass ?project=`,
+      run_id: match.runId,
+      project_ids: resolveResult.project_ids,
+    });
     return;
   }
+  const resolved = resolveResult.resolved;
 
   try {
     if (method === "GET" && match.key === undefined) {
@@ -509,67 +525,87 @@ async function handleContextRequest(
       return;
     }
 
-    if (method === "PUT" && match.key !== undefined) {
-      let raw: string;
-      try {
-        raw = await readBody(req);
-      } catch (err) {
-        const status =
-          typeof err === "object" &&
-          err !== null &&
-          "statusCode" in err &&
-          typeof (err as { statusCode: unknown }).statusCode === "number"
-            ? (err as { statusCode: number }).statusCode
-            : 500;
-        const msg = err instanceof Error ? err.message : String(err);
-        sendJson(res, status, {
-          error: status === 413 ? "payload_too_large" : "body_error",
-          message: msg,
+    // --- writes: require Bearer; serialize per runId ---
+    const isWrite = method === "PUT" || method === "DELETE";
+    if (isWrite && match.key !== undefined) {
+      const bearerOk = hasValidBearer(req, ctx.token);
+      const actor = resolveWriteActor(
+        req.headers["x-lazyorch-actor-role"],
+        bearerOk,
+      );
+      if (!actor.ok) {
+        sendJson(res, actor.status, {
+          error: actor.error,
+          message: actor.message,
         });
         return;
       }
-      let body: { value?: unknown } = {};
-      if (raw.trim() !== "") {
+
+      if (method === "PUT") {
+        let raw: string;
         try {
-          body = JSON.parse(raw) as typeof body;
-        } catch {
-          sendJson(res, 400, { error: "invalid_json" });
+          raw = await readBody(req);
+        } catch (err) {
+          const status =
+            typeof err === "object" &&
+            err !== null &&
+            "statusCode" in err &&
+            typeof (err as { statusCode: unknown }).statusCode === "number"
+              ? (err as { statusCode: number }).statusCode
+              : 500;
+          const msg = err instanceof Error ? err.message : String(err);
+          sendJson(res, status, {
+            error: status === 413 ? "payload_too_large" : "body_error",
+            message: msg,
+          });
           return;
         }
-      }
-      if (!body || typeof body !== "object" || !("value" in body)) {
-        sendJson(res, 400, {
-          error: "missing_value",
-          message: 'body must be { "value": ... }',
+        let body: { value?: unknown } = {};
+        if (raw.trim() !== "") {
+          try {
+            body = JSON.parse(raw) as typeof body;
+          } catch {
+            sendJson(res, 400, { error: "invalid_json" });
+            return;
+          }
+        }
+        if (!body || typeof body !== "object" || !("value" in body)) {
+          sendJson(res, 400, {
+            error: "missing_value",
+            message: 'body must be { "value": ... }',
+          });
+          return;
+        }
+        const workerWrite = await loadWorkerWrite(resolved.project.repo_root);
+        const doc = await withContextWriteLock(resolved.runId, () =>
+          putContextKey(
+            resolved.store,
+            resolved.runId,
+            match.key!,
+            body.value,
+            actor.role,
+            workerWrite,
+          ),
+        );
+        sendJson(res, 200, {
+          run_id: doc.run_id,
+          key: match.key,
+          value: doc.kv[match.key],
+          updated_at: doc.updated_at,
         });
         return;
       }
-      const workerWrite = await loadWorkerWrite(resolved.project.repo_root);
-      const doc = await putContextKey(
-        resolved.store,
-        resolved.runId,
-        match.key,
-        body.value,
-        actor.role,
-        workerWrite,
-      );
-      sendJson(res, 200, {
-        run_id: doc.run_id,
-        key: match.key,
-        value: doc.kv[match.key],
-        updated_at: doc.updated_at,
-      });
-      return;
-    }
 
-    if (method === "DELETE" && match.key !== undefined) {
+      // DELETE
       const workerWrite = await loadWorkerWrite(resolved.project.repo_root);
-      const result = await deleteContextKey(
-        resolved.store,
-        resolved.runId,
-        match.key,
-        actor.role,
-        workerWrite,
+      const result = await withContextWriteLock(resolved.runId, () =>
+        deleteContextKey(
+          resolved.store,
+          resolved.runId,
+          match.key!,
+          actor.role,
+          workerWrite,
+        ),
       );
       if (!result.deleted) {
         sendJson(res, 404, {
