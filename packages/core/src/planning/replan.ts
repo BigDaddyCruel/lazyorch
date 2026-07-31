@@ -8,7 +8,8 @@ export class ReplanError extends Error {
   readonly code:
     | "invalid_phase"
     | "integrating_mutex"
-    | "missing_plan_rev";
+    | "missing_plan_rev"
+    | "plan_not_frozen";
 
   constructor(code: ReplanError["code"], message: string) {
     super(message);
@@ -160,30 +161,42 @@ export function prepareReplan(
   return result;
 }
 
+export interface ResumeAfterReplanOptions {
+  /** ISO-8601; defaults to now */
+  updated_at?: string;
+  /**
+   * Frozen plan that must already be the execution contract.
+   * Required: status === "frozen" and freeze_hash present.
+   */
+  plan: Plan;
+}
+
 /**
- * Resume after replan freeze: PlanConsensus → Implementing.
- * Human plan_approve gate is the caller's responsibility.
+ * Resume after replan freeze: PlanConsensus → Implementing only.
+ *
+ * Requires an explicit frozen plan (`status === "frozen"` + `freeze_hash`) so
+ * callers cannot skip consensus by resuming from bare Planning (e.g. after
+ * max_rounds). Human plan_approve gate remains the caller's responsibility.
  */
 export function resumeAfterReplan(
   run: Run,
-  options: { updated_at?: string } = {},
+  options: ResumeAfterReplanOptions,
 ): Run {
-  if (run.phase === "PlanConsensus") {
-    return transitionRunPhase(run, "Implementing", {
-      updated_at: options.updated_at ?? new Date().toISOString(),
-    });
+  if (options.plan.status !== "frozen" || !options.plan.freeze_hash) {
+    throw new ReplanError(
+      "plan_not_frozen",
+      "resumeAfterReplan requires a frozen plan with freeze_hash",
+    );
   }
-  if (run.phase === "Planning") {
-    // Allow direct path when gates auto-approve
-    const via = transitionRunPhase(run, "PlanConsensus", {
-      updated_at: options.updated_at ?? new Date().toISOString(),
-    });
-    return transitionRunPhase(via, "Implementing", {
-      updated_at: options.updated_at ?? new Date().toISOString(),
-    });
+
+  if (run.phase !== "PlanConsensus") {
+    throw new ReplanError(
+      "invalid_phase",
+      `resumeAfterReplan requires PlanConsensus (after freeze), got ${run.phase}`,
+    );
   }
-  throw new ReplanError(
-    "invalid_phase",
-    `resumeAfterReplan requires PlanConsensus or Planning, got ${run.phase}`,
-  );
+
+  return transitionRunPhase(run, "Implementing", {
+    updated_at: options.updated_at ?? new Date().toISOString(),
+  });
 }

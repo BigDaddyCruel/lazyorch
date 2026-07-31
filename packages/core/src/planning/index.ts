@@ -11,6 +11,9 @@ export {
   DEFAULT_REQUIRED_SECTIONS,
   extractHeadings,
   headingMatches,
+  taskDrafts,
+  normalizeDependsOn,
+  textReferencesTaskId,
   validateTaskDag,
   validateTaskFields,
   validateDesignSections,
@@ -33,7 +36,13 @@ export {
   runConsensus,
   applyIssueUpdates,
   forceApproveResidual,
+  residualRisksFromIssues,
+  completeForceApprove,
+  detectPlanDispute,
+  wontfixIssueIds,
   type RunConsensusParams,
+  type CompleteForceApproveParams,
+  type CompleteForceApproveResult,
 } from "./consensus.js";
 
 export {
@@ -44,6 +53,7 @@ export {
   type SupersedeTasksResult,
   type PrepareReplanOptions,
   type PrepareReplanResult,
+  type ResumeAfterReplanOptions,
 } from "./replan.js";
 
 export type {
@@ -58,11 +68,13 @@ export type {
   PlanReviewContext,
   PlanReviewResult,
   FreezeValidatorOptions,
+  FreezeValidationCode,
   FreezeValidationError,
   FreezeValidationResult,
   FreezeInput,
   FrozenPlanResult,
   MaxRoundsResult,
+  DisputeResult,
   ConsensusResult,
   ConsensusConfig,
 } from "./types.js";

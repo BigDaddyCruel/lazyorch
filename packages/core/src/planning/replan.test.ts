@@ -10,10 +10,7 @@ import {
   supersedeOpenTasks,
 } from "./replan.js";
 
-function task(
-  id: string,
-  status: Task["status"],
-): Task {
+function task(id: string, status: Task["status"]): Task {
   return {
     id,
     run_id: "run_aaaaaaaaaaaaaaaaaaaaaaaa",
@@ -44,6 +41,22 @@ function run(phase: Run["phase"] = "Implementing"): Run {
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     plan_id: "plan_old",
+  };
+}
+
+function frozenPlan(): Plan {
+  return {
+    schema_version: SCHEMA_VERSION,
+    id: "plan_cccccccccccccccccccccccc",
+    run_id: "run_aaaaaaaaaaaaaaaaaaaaaaaa",
+    revision: 2,
+    status: "frozen",
+    issues: [],
+    task_ids: ["t1"],
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    freeze_hash: "abc123",
+    frozen_at: "2026-01-01T00:00:00.000Z",
   };
 }
 
@@ -122,27 +135,34 @@ describe("prepareReplan", () => {
       prepareReplan(run(), [task("t1", "integrating")], NEW_REV),
     ).toThrow(ReplanError);
 
-    const ok = prepareReplan(
-      run(),
-      [task("t1", "integrating")],
-      NEW_REV,
-      { reject_if_integrating: false },
-    );
+    const ok = prepareReplan(run(), [task("t1", "integrating")], NEW_REV, {
+      reject_if_integrating: false,
+    });
     expect(ok.cancelled_ids).toEqual(["t1"]);
     expect(ok.tasks[0]?.status).toBe("cancelled");
   });
 });
 
 describe("resumeAfterReplan", () => {
-  it("PlanConsensus → Implementing", () => {
+  it("PlanConsensus → Implementing when plan is frozen", () => {
     const next = resumeAfterReplan(run("PlanConsensus"), {
       updated_at: "2026-03-02T00:00:00.000Z",
+      plan: frozenPlan(),
     });
     expect(next.phase).toBe("Implementing");
   });
 
-  it("Planning → PlanConsensus → Implementing", () => {
-    const next = resumeAfterReplan(run("Planning"));
-    expect(next.phase).toBe("Implementing");
+  it("rejects Planning without freeze (no skip path)", () => {
+    expect(() =>
+      resumeAfterReplan(run("Planning"), { plan: frozenPlan() }),
+    ).toThrow(ReplanError);
+  });
+
+  it("rejects non-frozen plan", () => {
+    const draft = { ...frozenPlan(), status: "in_review" as const };
+    delete (draft as { freeze_hash?: string }).freeze_hash;
+    expect(() =>
+      resumeAfterReplan(run("PlanConsensus"), { plan: draft }),
+    ).toThrow(ReplanError);
   });
 });

@@ -11,7 +11,7 @@ import type {
 
 /**
  * Required DESIGN.md section headings (design-lazyorch).
- * Matched case-insensitively against markdown heading text.
+ * Matched case-insensitively: a heading must *contain* the required string.
  */
 export const DEFAULT_REQUIRED_SECTIONS: readonly string[] = [
   "Title",
@@ -47,16 +47,17 @@ export function extractHeadings(markdown: string): string[] {
 }
 
 /**
- * True if some heading contains `required` as a case-insensitive substring,
- * or required contains the heading (short aliases like "API" vs "API / interface changes").
+ * True if some heading contains `required` as a case-insensitive substring.
+ * Only heading→contains→required (not the reverse), so short headings like
+ * "S" cannot satisfy "Security".
  */
-export function headingMatches(headings: readonly string[], required: string): boolean {
+export function headingMatches(
+  headings: readonly string[],
+  required: string,
+): boolean {
   const needle = required.trim().toLowerCase();
   if (needle === "") return true;
-  return headings.some((h) => {
-    const hay = h.toLowerCase();
-    return hay.includes(needle) || needle.includes(hay);
-  });
+  return headings.some((h) => h.toLowerCase().includes(needle));
 }
 
 function nonEmptyString(value: unknown): boolean {
@@ -71,12 +72,46 @@ function nonEmptyStringArray(value: unknown): boolean {
   );
 }
 
+/** Safe task list from a possibly malformed TASK_DAG. */
+export function taskDrafts(dag: TaskDag | null | undefined): PlanTaskDraft[] {
+  return Array.isArray(dag?.tasks) ? dag.tasks : [];
+}
+
+/**
+ * Normalize depends_on to a string array when possible.
+ * Returns null when the field is present but not a valid string array.
+ * Missing/undefined is treated as [] (valid empty deps).
+ */
+export function normalizeDependsOn(
+  value: unknown,
+): string[] | null {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return null;
+  if (!value.every((v) => typeof v === "string")) return null;
+  return value as string[];
+}
+
+/** Escape a string for use inside a RegExp character class / pattern. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True if `id` appears in text as a whole token
+ * (not a substring of a longer id like tsk_1 inside tsk_10).
+ */
+export function textReferencesTaskId(text: string, id: string): boolean {
+  if (!nonEmptyString(id)) return false;
+  const re = new RegExp(
+    `(^|[^A-Za-z0-9_])${escapeRegExp(id)}([^A-Za-z0-9_]|$)`,
+  );
+  return re.test(text);
+}
+
 /** Validate TASK_DAG structure: DAG, deps exist, required task fields. */
-export function validateTaskDag(
-  dag: TaskDag,
-): FreezeValidationError[] {
+export function validateTaskDag(dag: TaskDag | null | undefined): FreezeValidationError[] {
   const errors: FreezeValidationError[] = [];
-  const tasks = dag.tasks ?? [];
+  const tasks = taskDrafts(dag);
 
   if (tasks.length === 0) {
     errors.push({
@@ -88,24 +123,45 @@ export function validateTaskDag(
 
   const ids = new Set<string>();
   for (const t of tasks) {
-    if (ids.has(t.id)) {
+    const id = typeof t.id === "string" ? t.id : "";
+    if (ids.has(id) && nonEmptyString(id)) {
       errors.push({
         code: "duplicate_id",
-        message: `Duplicate task id: ${t.id}`,
-        path: t.id,
+        message: `Duplicate task id: ${id}`,
+        path: id,
       });
     }
-    ids.add(t.id);
+    if (nonEmptyString(id)) {
+      ids.add(id);
+    }
   }
 
-  // Field presence
+  // Field presence (including id + depends_on shape)
   for (const t of tasks) {
     errors.push(...validateTaskFields(t));
   }
 
+  // Build nodes with normalized depends_on for DAG helpers (never throw TypeError)
+  const nodes: { id: string; depends_on: string[] }[] = [];
+  for (const t of tasks) {
+    const id = typeof t.id === "string" ? t.id.trim() : "";
+    if (!nonEmptyString(id)) continue; // empty_id already reported
+    const deps = normalizeDependsOn(t.depends_on);
+    if (deps === null) {
+      // already reported as invalid_depends_on in validateTaskFields
+      nodes.push({ id, depends_on: [] });
+      continue;
+    }
+    nodes.push({ id, depends_on: deps });
+  }
+
+  if (nodes.length === 0) {
+    return errors;
+  }
+
   // Missing deps + cycles via existing DAG helpers
   try {
-    topologicalSort(tasks.map((t) => ({ id: t.id, depends_on: t.depends_on })));
+    topologicalSort(nodes);
   } catch (e) {
     if (e instanceof DagError) {
       if (e.code === "cycle") {
@@ -113,7 +169,6 @@ export function validateTaskDag(
       } else if (e.code === "missing_dep") {
         errors.push({ code: "missing_dep", message: e.message });
       } else if (e.code === "duplicate_id") {
-        // already reported above; keep message if we missed it
         if (!errors.some((x) => x.code === "duplicate_id")) {
           errors.push({ code: "duplicate_id", message: e.message });
         }
@@ -123,11 +178,9 @@ export function validateTaskDag(
     }
   }
 
-  // hasCycle is redundant with topo sort but explicit for empty-dep graphs with cycles
-  // only when topo didn't already catch (e.g. if we skipped topo due to dups)
   if (!errors.some((x) => x.code === "cycle" || x.code === "duplicate_id")) {
     try {
-      if (hasCycle(tasks.map((t) => ({ id: t.id, depends_on: t.depends_on })))) {
+      if (hasCycle(nodes)) {
         errors.push({
           code: "cycle",
           message: "TASK_DAG contains a cycle",
@@ -143,39 +196,59 @@ export function validateTaskDag(
 
 export function validateTaskFields(t: PlanTaskDraft): FreezeValidationError[] {
   const errors: FreezeValidationError[] = [];
+  const idLabel =
+    typeof t.id === "string" && t.id.trim() !== "" ? t.id : "<missing-id>";
+
+  if (!nonEmptyString(t.id)) {
+    errors.push({
+      code: "empty_id",
+      message: "Task has empty or missing id",
+      path: idLabel,
+    });
+  }
+
+  const deps = normalizeDependsOn(t.depends_on);
+  if (deps === null) {
+    errors.push({
+      code: "invalid_depends_on",
+      message: `Task ${idLabel} has invalid depends_on (must be a string array)`,
+      path: idLabel,
+    });
+  }
+
   if (!nonEmptyString(t.title)) {
     errors.push({
       code: "empty_title",
-      message: `Task ${t.id} has empty title`,
-      path: t.id,
+      message: `Task ${idLabel} has empty title`,
+      path: idLabel,
     });
   }
   if (!nonEmptyString(t.description)) {
     errors.push({
       code: "empty_description",
-      message: `Task ${t.id} has empty description`,
-      path: t.id,
+      message: `Task ${idLabel} has empty description`,
+      path: idLabel,
     });
   }
   if (!nonEmptyStringArray(t.acceptance)) {
     errors.push({
       code: "empty_acceptance",
-      message: `Task ${t.id} has empty acceptance[]`,
-      path: t.id,
+      message: `Task ${idLabel} has empty acceptance[]`,
+      path: idLabel,
     });
   }
   if (!nonEmptyStringArray(t.scope)) {
     errors.push({
       code: "empty_scope",
-      message: `Task ${t.id} has empty scope[]`,
-      path: t.id,
+      message: `Task ${idLabel} has empty scope[]`,
+      path: idLabel,
     });
   }
   if (!nonEmptyStringArray(t.role_affinity)) {
     errors.push({
       code: "empty_role_affinity",
-      message: `Task ${t.id} has empty role_affinity[]`,
-      path: t.id,
+      message: `Task ${idLabel} has empty role_affinity[]`,
+      path: idLabel,
     });
   }
   return errors;
@@ -186,7 +259,7 @@ export function validateDesignSections(
   designMd: string,
   required: readonly string[] = DEFAULT_REQUIRED_SECTIONS,
 ): FreezeValidationError[] {
-  const headings = extractHeadings(designMd);
+  const headings = extractHeadings(designMd ?? "");
   const errors: FreezeValidationError[] = [];
   for (const section of required) {
     if (!headingMatches(headings, section)) {
@@ -204,7 +277,7 @@ export function validateDesignSize(
   designMd: string,
   maxBytes: number = DEFAULT_MAX_DESIGN_BYTES,
 ): FreezeValidationError[] {
-  const bytes = Buffer.byteLength(designMd, "utf8");
+  const bytes = Buffer.byteLength(designMd ?? "", "utf8");
   if (bytes > maxBytes) {
     return [
       {
@@ -216,14 +289,23 @@ export function validateDesignSize(
   return [];
 }
 
-/** Every plan-origin task id must appear in PR_PLAN.md. */
+/** Every plan-origin task id must appear in PR_PLAN.md as a whole token. */
 export function validatePrPlanCoverage(
   prPlanMd: string,
   taskIds: readonly string[],
 ): FreezeValidationError[] {
   const errors: FreezeValidationError[] = [];
+  const text = prPlanMd ?? "";
   for (const id of taskIds) {
-    if (!prPlanMd.includes(id)) {
+    if (!nonEmptyString(id)) {
+      errors.push({
+        code: "pr_plan_coverage",
+        message: "PR_PLAN.md cannot cover empty task id",
+        path: id,
+      });
+      continue;
+    }
+    if (!textReferencesTaskId(text, id)) {
       errors.push({
         code: "pr_plan_coverage",
         message: `PR_PLAN.md does not reference task ${id}`,
@@ -240,15 +322,15 @@ export function validatePrPlanCoverage(
  * matches (full lock lattice lives in forge).
  */
 export function validateScopeOverlaps(
-  dag: TaskDag,
+  dag: TaskDag | null | undefined,
   strict: boolean,
 ): FreezeValidationError[] {
   if (!strict) return [];
 
-  const tasks = dag.tasks ?? [];
+  const tasks = taskDrafts(dag);
   const declared = new Set<string>();
-  for (const entry of dag.meta?.overlapping_scopes ?? []) {
-    const sorted = [...entry.task_ids].sort();
+  for (const entry of dag?.meta?.overlapping_scopes ?? []) {
+    const sorted = [...(entry.task_ids ?? [])].sort();
     for (let i = 0; i < sorted.length; i++) {
       for (let j = i + 1; j < sorted.length; j++) {
         declared.add(`${sorted[i]}|${sorted[j]}`);
@@ -259,16 +341,24 @@ export function validateScopeOverlaps(
   const errors: FreezeValidationError[] = [];
   for (let i = 0; i < tasks.length; i++) {
     const a = tasks[i]!;
-    const aScopes = new Set(a.scope.map((s) => s.trim()).filter(Boolean));
+    const aScopeList = Array.isArray(a.scope) ? a.scope : [];
+    const aScopes = new Set(
+      aScopeList
+        .filter((s): s is string => typeof s === "string")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
     for (let j = i + 1; j < tasks.length; j++) {
       const b = tasks[j]!;
+      const bScopeList = Array.isArray(b.scope) ? b.scope : [];
       const shared: string[] = [];
-      for (const s of b.scope) {
+      for (const s of bScopeList) {
+        if (typeof s !== "string") continue;
         const t = s.trim();
         if (t && aScopes.has(t)) shared.push(t);
       }
       if (shared.length === 0) continue;
-      const pair = [a.id, b.id].sort();
+      const pair = [String(a.id ?? ""), String(b.id ?? "")].sort();
       const key = `${pair[0]}|${pair[1]}`;
       if (!declared.has(key)) {
         errors.push({
@@ -284,6 +374,7 @@ export function validateScopeOverlaps(
 
 /**
  * Full freeze validators (design-lazyorch § freeze validators).
+ * Total function: never throws on malformed drafts — returns structured errors.
  * All must pass; open issues must be 0.
  */
 export function validateFreeze(input: FreezeInput): FreezeValidationResult {
@@ -294,7 +385,7 @@ export function validateFreeze(input: FreezeInput): FreezeValidationResult {
 
   const errors: FreezeValidationError[] = [];
 
-  const open = countOpenIssues(input.issues);
+  const open = countOpenIssues(input.issues ?? []);
   if (open > 0) {
     errors.push({
       code: "open_issues",
@@ -302,17 +393,20 @@ export function validateFreeze(input: FreezeInput): FreezeValidationResult {
     });
   }
 
-  const { artifacts } = input;
-  errors.push(...validateTaskDag(artifacts.task_dag));
-  errors.push(...validateDesignSections(artifacts.design_md, required));
-  errors.push(...validateDesignSize(artifacts.design_md, maxBytes));
+  const artifacts = input.artifacts;
+  const dag = artifacts?.task_dag;
+  const tasks = taskDrafts(dag);
+
+  errors.push(...validateTaskDag(dag));
+  errors.push(...validateDesignSections(artifacts?.design_md ?? "", required));
+  errors.push(...validateDesignSize(artifacts?.design_md ?? "", maxBytes));
   errors.push(
     ...validatePrPlanCoverage(
-      artifacts.pr_plan_md,
-      artifacts.task_dag.tasks.map((t) => t.id),
+      artifacts?.pr_plan_md ?? "",
+      tasks.map((t) => (typeof t.id === "string" ? t.id : "")),
     ),
   );
-  errors.push(...validateScopeOverlaps(artifacts.task_dag, strictScopes));
+  errors.push(...validateScopeOverlaps(dag, strictScopes));
 
   return { ok: errors.length === 0, errors };
 }

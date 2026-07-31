@@ -64,6 +64,11 @@ export interface PlanWriteContext {
   previous?: PlanArtifacts;
   /** Blocking issues the writer must address */
   open_issues: PlanIssue[];
+  /**
+   * Freeze validator failures from the previous revision (0 open issues but
+   * freeze still rejected — missing sections, scope overlaps, etc.).
+   */
+  validation_errors?: FreezeValidationError[];
   /** Prior frozen plan when mid-run replan */
   prior_plan?: Plan;
 }
@@ -98,28 +103,32 @@ export interface FreezeValidatorOptions {
   /** When true (default), undeclared scope overlaps are errors. */
   strict_scopes?: boolean;
   /**
-   * Required DESIGN.md section headings (case-insensitive substring match
-   * against markdown headings). Defaults to design-doc list.
+   * Required DESIGN.md section headings (case-insensitive: heading must
+   * contain the required string). Defaults to design-doc list.
    */
   required_sections?: readonly string[];
 }
 
+export type FreezeValidationCode =
+  | "empty_dag"
+  | "cycle"
+  | "missing_dep"
+  | "duplicate_id"
+  | "empty_id"
+  | "invalid_depends_on"
+  | "empty_title"
+  | "empty_description"
+  | "empty_acceptance"
+  | "empty_scope"
+  | "empty_role_affinity"
+  | "missing_section"
+  | "design_too_large"
+  | "open_issues"
+  | "pr_plan_coverage"
+  | "scope_overlap";
+
 export interface FreezeValidationError {
-  code:
-    | "empty_dag"
-    | "cycle"
-    | "missing_dep"
-    | "duplicate_id"
-    | "empty_title"
-    | "empty_description"
-    | "empty_acceptance"
-    | "empty_scope"
-    | "empty_role_affinity"
-    | "missing_section"
-    | "design_too_large"
-    | "open_issues"
-    | "pr_plan_coverage"
-    | "scope_overlap";
+  code: FreezeValidationCode;
   message: string;
   /** Task id, section name, or issue id when applicable. */
   path?: string;
@@ -157,7 +166,23 @@ export interface MaxRoundsResult {
   validation_errors: FreezeValidationError[];
 }
 
-export type ConsensusResult = FrozenPlanResult | MaxRoundsResult;
+/**
+ * Writer marked wontfix; reviewer re-opened same issue at high/critical
+ * (design dispute escalation — blocks freeze until plan_dispute gate).
+ */
+export interface DisputeResult {
+  status: "dispute";
+  plan: Plan;
+  artifacts: PlanArtifacts;
+  tasks: Task[];
+  rounds: number;
+  disputed_issue_ids: string[];
+}
+
+export type ConsensusResult =
+  | FrozenPlanResult
+  | MaxRoundsResult
+  | DisputeResult;
 
 export interface ConsensusConfig {
   /** Default 5. */
