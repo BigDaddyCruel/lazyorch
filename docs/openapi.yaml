@@ -353,6 +353,10 @@ paths:
       responses:
         "200":
           description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextDeleteResponse"
         "401":
           description: Bearer required for writes
           content:
@@ -554,10 +558,15 @@ components:
           type: string
     ContextListResponse:
       type: object
-      description: Shape from listContextResponse (keys + kv)
+      description: |
+        Shape from `listContextResponse` — always includes document `updated_at`.
+      required: [run_id, updated_at, keys, kv]
       properties:
         run_id:
           type: string
+        updated_at:
+          type: string
+          format: date-time
         keys:
           type: array
           items:
@@ -567,14 +576,34 @@ components:
           additionalProperties: true
     ContextGetResponse:
       type: object
+      description: |
+        Shape from `getContextResponse` / PUT success. Missing keys return HTTP 404
+        (`ContextKvError`), not a body with `found: false`.
+      required: [run_id, key, value, updated_at]
       properties:
         run_id:
           type: string
         key:
           type: string
         value: {}
-        found:
+        updated_at:
+          type: string
+          format: date-time
+    ContextDeleteResponse:
+      type: object
+      description: DELETE success body when the key existed
+      required: [ok, run_id, key, deleted]
+      properties:
+        ok:
           type: boolean
+          example: true
+        run_id:
+          type: string
+        key:
+          type: string
+        deleted:
+          type: boolean
+          example: true
     ErrorBody:
       type: object
       properties:

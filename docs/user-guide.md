@@ -434,7 +434,7 @@ shell:
 
 4. Prefer scripted acceptance (`pnpm test`, `tsc -b`) over free-form shell.
 
-Session env is **scrubbed** before spawn (no `GH_TOKEN` / `LAZYORCH_*` / API keys). Prompts run through token redaction. `lazyorch logs` redacts common token shapes on **display** only (JSONL on disk is not rewritten).
+Session env is **scrubbed** before spawn (no `GH_TOKEN` / `LAZYORCH_*` / AWS/DB creds / API keys). Prompts run through token redaction. `lazyorch logs` and the GUI Logs page redact common token shapes on **display** only (JSONL on disk and SSE wire frames are not rewritten).
 
 Installer / Windows Defender / npm global notes: [`release.md`](./release.md).
 

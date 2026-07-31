@@ -16,8 +16,10 @@ describe("isSecretEnvKey", () => {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "XAI_API_KEY",
+    "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
     "LAZYORCH_HOME",
     "LAZYORCH_GITHUB_TOKEN",
     "LAZYORCH_DAEMON_TOKEN",
@@ -27,6 +29,17 @@ describe("isSecretEnvKey", () => {
     "SERVICE_PRIVATE_KEY",
     "CLOUD_ACCESS_KEY",
     "custom_api_key",
+    "PGPASSWORD",
+    "MYSQL_PWD",
+    "DATABASE_URL",
+    "MONGO_URL",
+    "MONGODB_URI",
+    "REDIS_URL",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_API_KEY",
+    "SOME_SECRET_KEY",
+    "PROD_ACCESS_KEY_ID",
+    "APP_DATABASE_URL",
   ])("treats %s as secret", (key) => {
     expect(isSecretEnvKey(key)).toBe(true);
   });
@@ -41,6 +54,15 @@ describe("isSecretEnvKey", () => {
     "LANG",
     "npm_config_user_agent",
     "SAFE_FLAG",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "XAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT_ID",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "PUBLIC_URL",
+    "APP_BASE_URL",
   ])("treats %s as non-secret", (key) => {
     expect(isSecretEnvKey(key)).toBe(false);
   });
@@ -57,6 +79,31 @@ describe("scrubEnv", () => {
       NODE_ENV: "test",
     });
     expect(out).toEqual({ PATH: "/usr/bin", NODE_ENV: "test" });
+  });
+
+  it("strips AWS / DB / Stripe inventory that design hardening requires", () => {
+    const out = scrubEnv({
+      PATH: "/usr/bin",
+      AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE",
+      AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG",
+      AWS_SESSION_TOKEN: "sess",
+      PGPASSWORD: "dbpw",
+      STRIPE_SECRET_KEY: "sk_live_example",
+      DATABASE_URL: "postgres://u:secret@localhost/db",
+      REDIS_URL: "redis://:pw@localhost:6379",
+      MONGODB_URI: "mongodb://u:p@localhost/db",
+      AWS_REGION: "us-east-1",
+      NODE_ENV: "test",
+    });
+    expect(out).toEqual({
+      PATH: "/usr/bin",
+      AWS_REGION: "us-east-1",
+      NODE_ENV: "test",
+    });
+    expect(out.AWS_ACCESS_KEY_ID).toBeUndefined();
+    expect(out.PGPASSWORD).toBeUndefined();
+    expect(out.STRIPE_SECRET_KEY).toBeUndefined();
+    expect(out.DATABASE_URL).toBeUndefined();
   });
 
   it("drops undefined values and never mutates input", () => {
@@ -168,19 +215,24 @@ describe("scrubText (log / prompt redaction)", () => {
     expect(t.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("redacts AWS access key ids (AKIA…)", () => {
-    const t = scrubText("aws key AKIAIOSFODNN7EXAMPLE leftover");
+  it("redacts AWS permanent (AKIA) and temporary (ASIA) access key ids", () => {
+    const t = scrubText(
+      "perm AKIAIOSFODNN7EXAMPLE temp ASIAIOSFODNN7EXAMPLE leftover",
+    );
     expect(t).not.toContain("AKIAIOSFODNN7EXAMPLE");
-    expect(t).toContain("[REDACTED]");
+    expect(t).not.toContain("ASIAIOSFODNN7EXAMPLE");
+    expect(t.match(/\[REDACTED\]/g)?.length).toBe(2);
+  });
+
+  it("leaves short sk- substrings under the length floor intact", () => {
+    const input =
+      "Run pnpm test; model sk-not-long-enough stays if under length floor.";
+    expect(scrubText(input)).toBe(input);
   });
 
   it("leaves non-secret prose intact", () => {
-    const prose =
-      "Run pnpm test and git status; model sk-not-long-enough stays if under length floor.";
-    // sk- with short suffix may or may not match depending on {20,} — use plain text
     const safe = scrubText("Run pnpm test; no tokens here.");
     expect(safe).toBe("Run pnpm test; no tokens here.");
-    expect(prose.length).toBeGreaterThan(0);
   });
 
   it("redacts tokens embedded in log.line-style JSON payloads", () => {

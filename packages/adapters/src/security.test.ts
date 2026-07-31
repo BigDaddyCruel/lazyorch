@@ -162,41 +162,47 @@ describe("security: shell spawn env", () => {
       };
     };
 
+    // Inject baseEnv — never mutate global process.env (parallel-safe).
     const shell = createShellAdapter({
       allowlist: { allowed_commands: ["node"], deny_patterns: [] },
       spawnImpl,
+      baseEnv: {
+        PATH: "/usr/bin",
+        NODE_ENV: "test",
+        GH_TOKEN: "ghp_from_process_env_abcdefghij",
+        LAZYORCH_TEST_TOKEN: "lazy-from-process",
+        AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE",
+        PGPASSWORD: "dbpw",
+        DATABASE_URL: "postgres://u:secret@localhost/db",
+        STRIPE_SECRET_KEY: "sk_live_x",
+        SAFE_FROM_BASE: "base-ok",
+      },
     });
 
-    const prevToken = process.env.GH_TOKEN;
-    const prevLazy = process.env.LAZYORCH_TEST_TOKEN;
-    process.env.GH_TOKEN = "ghp_from_process_env_abcdefghij";
-    process.env.LAZYORCH_TEST_TOKEN = "lazy-from-process";
-
-    try {
-      const agent = await shell.start(
-        baseSession(dir, {
-          env: {
-            SAFE: "yes",
-            GITHUB_TOKEN: "from-session",
-            OPENAI_API_KEY: "sk-session",
-          },
-          command: [process.execPath, "-e", "process.exit(0)"],
-        }),
-      );
-      await agent.wait();
-    } finally {
-      if (prevToken === undefined) delete process.env.GH_TOKEN;
-      else process.env.GH_TOKEN = prevToken;
-      if (prevLazy === undefined) delete process.env.LAZYORCH_TEST_TOKEN;
-      else process.env.LAZYORCH_TEST_TOKEN = prevLazy;
-    }
+    const agent = await shell.start(
+      baseSession(dir, {
+        env: {
+          SAFE: "yes",
+          GITHUB_TOKEN: "from-session",
+          OPENAI_API_KEY: "sk-session",
+        },
+        command: [process.execPath, "-e", "process.exit(0)"],
+      }),
+    );
+    await agent.wait();
 
     expect(capturedEnv).toBeDefined();
     expect(capturedEnv!.SAFE).toBe("yes");
+    expect(capturedEnv!.SAFE_FROM_BASE).toBe("base-ok");
+    expect(capturedEnv!.PATH).toBe("/usr/bin");
     expect(capturedEnv!.GH_TOKEN).toBeUndefined();
     expect(capturedEnv!.GITHUB_TOKEN).toBeUndefined();
     expect(capturedEnv!.OPENAI_API_KEY).toBeUndefined();
     expect(capturedEnv!.LAZYORCH_TEST_TOKEN).toBeUndefined();
+    expect(capturedEnv!.AWS_ACCESS_KEY_ID).toBeUndefined();
+    expect(capturedEnv!.PGPASSWORD).toBeUndefined();
+    expect(capturedEnv!.DATABASE_URL).toBeUndefined();
+    expect(capturedEnv!.STRIPE_SECRET_KEY).toBeUndefined();
   });
 });
 

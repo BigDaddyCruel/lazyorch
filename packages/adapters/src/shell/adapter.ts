@@ -47,6 +47,11 @@ export interface ShellAdapterOptions {
    * When omitted, uses node:child_process.spawn.
    */
   spawnImpl?: SpawnImpl;
+  /**
+   * Base env merged under session.env before scrub (default: `process.env`).
+   * Tests inject a fake map so they never mutate global `process.env`.
+   */
+  baseEnv?: Record<string, string | undefined>;
 }
 
 export interface SpawnRequest {
@@ -81,11 +86,13 @@ export class ShellAdapter implements AgentAdapter {
   readonly id = "shell" as const;
   private readonly allowlist: ShellAllowlistConfig;
   private readonly spawnImpl: SpawnImpl;
+  private readonly baseEnv: Record<string, string | undefined> | undefined;
   private readonly live = new Map<string, LiveEntry>();
 
   constructor(options: ShellAdapterOptions = {}) {
     this.allowlist = options.allowlist ?? DEFAULT_SHELL_ALLOWLIST;
     this.spawnImpl = options.spawnImpl ?? defaultSpawnImpl;
+    this.baseEnv = options.baseEnv;
   }
 
   async doctor(): Promise<DoctorResult> {
@@ -137,10 +144,10 @@ export class ShellAdapter implements AgentAdapter {
     const log_path = join(session.session_dir, "stdio.log");
     await mkdir(session.session_dir, { recursive: true });
 
-    // Scrub secrets from process.env + session.env. Never forward LAZYORCH_*,
-    // GH_TOKEN, API keys, etc. (session_kind is already on AgentSession / meta.json).
+    // Scrub secrets from base env (process.env or test inject) + session.env.
+    // Never forward LAZYORCH_*, GH_TOKEN, AWS/DB creds, API keys, etc.
     const cleanEnv = scrubEnv({
-      ...process.env,
+      ...(this.baseEnv ?? process.env),
       ...session.env,
     });
 

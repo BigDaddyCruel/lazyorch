@@ -1,14 +1,17 @@
 /**
  * Scrub secrets from env maps and prompt text before materialization.
- * Secrets (GH_TOKEN, GITHUB_TOKEN, LAZYORCH_*, redaction-regex keys)
- * are never written into prompt.md or default session env.
+ * Secrets (GH_TOKEN, GITHUB_TOKEN, LAZYORCH_*, AWS/DB credentials, redaction
+ * regex keys) are never written into prompt.md or default session env.
  *
  * Coding CLI child processes use {@link scrubCodingSpawnEnv}: orchestrator
  * secrets stay scrubbed, but well-known vendor API keys are preserved so
  * live claude/codex/grok can authenticate.
  */
 
-/** Env key names that must never be forwarded into agent sessions / prompts. */
+/**
+ * Env key names that must never be forwarded into agent sessions / prompts.
+ * Prefer patterns below; exact set covers non-suffixed names and common cloud/DB keys.
+ */
 const SECRET_ENV_EXACT = new Set([
   "GH_TOKEN",
   "GITHUB_TOKEN",
@@ -16,21 +19,34 @@ const SECRET_ENV_EXACT = new Set([
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
   "XAI_API_KEY",
+  "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
   "AWS_SESSION_TOKEN",
+  "AWS_SECURITY_TOKEN",
+  "PGPASSWORD",
+  "MYSQL_PWD",
+  "DATABASE_URL",
+  "MONGO_URL",
+  "MONGODB_URI",
+  "REDIS_URL",
 ]);
 
-/** Match keys like LAZYORCH_*, *_TOKEN, *_SECRET, *_API_KEY, *_PASSWORD. */
+/**
+ * Match keys like LAZYORCH_*, *_TOKEN, *_SECRET, *_PASSWORD, *_API_KEY,
+ * *_PRIVATE_KEY, *_ACCESS_KEY, *_SECRET_KEY, *_ACCESS_KEY_ID, and generic *_KEY
+ * (design threat model: TOKEN|SECRET|PASSWORD|API_KEY|_KEY).
+ * Also connection-string style *DATABASE_URL / *URI when not in exact set.
+ */
 const SECRET_ENV_RE =
-  /^(LAZYORCH_.*|.*_(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY))$/i;
+  /^(LAZYORCH_.*|PGPASSWORD|MYSQL_PWD|.*_(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY|SECRET_KEY|ACCESS_KEY_ID|DATABASE_URL|URI)|.*_KEY)$/i;
 
 /**
  * Best-effort redaction of secret-looking tokens in free text (prompts, logs).
- * Covers common GitHub PAT/OAuth prefixes, OpenAI/xAI keys, and AWS access key ids.
- * Not a substitute for pre-integrate secret scan (KD-45).
+ * Covers common GitHub PAT/OAuth prefixes, OpenAI/xAI keys, and AWS access key
+ * ids (AKIA permanent / ASIA temporary). Not a substitute for KD-45 secret scan.
  */
 const SECRET_VALUE_RE =
-  /\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b/g;
+  /\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16})\b/g;
 
 /**
  * Vendor credentials allowed on coding-CLI child processes only.
@@ -52,6 +68,7 @@ export const CODING_VENDOR_ENV_ALLOWLIST = new Set([
 
 export function isSecretEnvKey(key: string): boolean {
   if (SECRET_ENV_EXACT.has(key)) return true;
+  // Avoid /g lastIndex mutation: construct match without sticky state
   if (SECRET_ENV_RE.test(key)) return true;
   return false;
 }

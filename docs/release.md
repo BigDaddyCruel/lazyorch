@@ -122,6 +122,7 @@ This repo uses LF. Prefer `git config core.autocrlf false` in the clone so forma
 | Coding CLI env | Same scrub, then re-inject allowlisted vendor keys (`ANTHROPIC_*`, `OPENAI_*`, `XAI_*`) for live auth |
 | Prompts | `scrubText` redacts common token prefixes before writing `prompt.md` |
 | `lazyorch logs` | Display-time redaction only; durable JSONL on disk is not rewritten |
+| GUI Logs page | Display-time redaction of event payloads (same token patterns); SSE wire still raw |
 | Shell adapter | Allowlist + deny_patterns — **not a full sandbox** (see below) |
 | GitHub forge | Forge-owned; `gh` is **not** on the default agent shell allowlist |
 
