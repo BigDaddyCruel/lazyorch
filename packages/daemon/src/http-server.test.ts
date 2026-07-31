@@ -1,7 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, afterEach } from "vitest";
+import { SCHEMA_VERSION, StateStore } from "@lazyorch/core";
 import { ProjectRegistry } from "./project-registry.js";
 import { EventBus } from "./events.js";
 import { createDaemonHttpServer } from "./http-server.js";
@@ -219,6 +220,127 @@ describe("daemon HTTP stubs", () => {
       if (prev === undefined) delete process.env.LAZYORCH_URL;
       else process.env.LAZYORCH_URL = prev;
     }
+  });
+
+  it("context KV GET/PUT/DELETE with write ACL", async () => {
+    const home = await tempHome();
+    const { base, serve } = await listenEphemeral(home);
+    const auth = { Authorization: `Bearer ${serve.token}` };
+
+    const repo = join(home, "ctx-repo");
+    await mkdir(repo, { recursive: true });
+    const initRes = await fetch(`${base}/v1/projects/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo_root: repo,
+        id: "proj_ctx_http",
+        name: "Ctx",
+      }),
+    });
+    expect(initRes.status).toBe(200);
+
+    const runId = "run_ctx_http";
+    const store = new StateStore(join(repo, ".lazyorch"));
+    await store.writeRun({
+      schema_version: SCHEMA_VERSION,
+      id: runId,
+      project_id: "proj_ctx_http",
+      phase: "Implementing",
+      idea: "ctx http",
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+
+    // list empty (read remains open on loopback)
+    const listEmpty = await fetch(`${base}/v1/runs/${runId}/context`);
+    expect(listEmpty.status).toBe(200);
+    const listEmptyBody = (await listEmpty.json()) as { keys: string[] };
+    expect(listEmptyBody.keys).toEqual([]);
+
+    // write without Bearer → 401
+    const noAuth = await fetch(`${base}/v1/runs/${runId}/context/port`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: 7420 }),
+    });
+    expect(noAuth.status).toBe(401);
+
+    // human (default with Bearer) can set
+    const put = await fetch(`${base}/v1/runs/${runId}/context/port`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...auth },
+      body: JSON.stringify({ value: 7420 }),
+    });
+    expect(put.status).toBe(200);
+    const putBody = (await put.json()) as { key: string; value: number };
+    expect(putBody.key).toBe("port");
+    expect(putBody.value).toBe(7420);
+
+    // namespaced key
+    const putPin = await fetch(
+      `${base}/v1/runs/${runId}/context/model_pin/worker`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...auth },
+        body: JSON.stringify({ value: "claude" }),
+      },
+    );
+    expect(putPin.status).toBe(200);
+
+    const getOne = await fetch(`${base}/v1/runs/${runId}/context/port`);
+    expect(getOne.status).toBe(200);
+    const getBody = (await getOne.json()) as { value: number };
+    expect(getBody.value).toBe(7420);
+
+    const list = await fetch(`${base}/v1/runs/${runId}/context`);
+    const listBody = (await list.json()) as { keys: string[] };
+    expect(listBody.keys).toEqual(["model_pin/worker", "port"]);
+
+    // worker forbidden by default (with Bearer + role claim)
+    const workerPut = await fetch(`${base}/v1/runs/${runId}/context/x`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...auth,
+        "X-LazyOrch-Actor-Role": "worker",
+      },
+      body: JSON.stringify({ value: 1 }),
+    });
+    expect(workerPut.status).toBe(403);
+
+    // lead can write
+    const leadPut = await fetch(`${base}/v1/runs/${runId}/context/lead_ok`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...auth,
+        "X-LazyOrch-Actor-Role": "lead",
+      },
+      body: JSON.stringify({ value: true }),
+    });
+    expect(leadPut.status).toBe(200);
+
+    // delete requires Bearer
+    const delNoAuth = await fetch(`${base}/v1/runs/${runId}/context/port`, {
+      method: "DELETE",
+    });
+    expect(delNoAuth.status).toBe(401);
+
+    const del = await fetch(`${base}/v1/runs/${runId}/context/port`, {
+      method: "DELETE",
+      headers: auth,
+    });
+    expect(del.status).toBe(200);
+    const getMissing = await fetch(`${base}/v1/runs/${runId}/context/port`);
+    expect(getMissing.status).toBe(404);
+
+    // unknown run
+    const missingRun = await fetch(`${base}/v1/runs/run_nope/context`);
+    expect(missingRun.status).toBe(404);
+
+    await stopDaemon(serve, home);
+    dropServe(serve);
   });
 
   it("createDaemonHttpServer 404 for unknown path", async () => {

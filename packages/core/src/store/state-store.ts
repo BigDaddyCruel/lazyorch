@@ -7,6 +7,12 @@ import type { Run } from "../types/run.js";
 import type { Task } from "../types/task.js";
 import type { Team } from "../types/team.js";
 import { readJsonFile, writeJsonFile } from "./json-io.js";
+import {
+  emptyRunContext,
+  deleteContextValue,
+  setContextValue,
+  type RunContext,
+} from "./context-kv.js";
 
 /**
  * JSON file I/O for LazyOrch entities under a state root
@@ -17,6 +23,7 @@ import { readJsonFile, writeJsonFile } from "./json-io.js";
  *   runs/<run_id>/run.json
  *   runs/<run_id>/team.json
  *   runs/<run_id>/gates.json
+ *   runs/<run_id>/context.json
  *   runs/<run_id>/tasks/<task_id>.json
  *   plans/<run_id>/plan.json
  */
@@ -146,6 +153,55 @@ export class StateStore {
 
   async writePlan(plan: Plan): Promise<void> {
     await writeJsonFile(this.planPath(plan.run_id), plan);
+  }
+
+  // --- shared context KV (runs/<id>/context.json) ---
+
+  contextPath(runId: string): string {
+    return join(this.runDir(runId), "context.json");
+  }
+
+  async readContext(runId: string): Promise<RunContext | null> {
+    return readJsonFile<RunContext>(this.contextPath(runId));
+  }
+
+  async writeContext(ctx: RunContext): Promise<void> {
+    await writeJsonFile(this.contextPath(ctx.run_id), ctx);
+  }
+
+  /**
+   * Load context or create an empty document for the run.
+   * Does not require the run entity to exist (caller may enforce).
+   */
+  async loadOrEmptyContext(runId: string): Promise<RunContext> {
+    const existing = await this.readContext(runId);
+    if (existing) return existing;
+    return emptyRunContext(runId);
+  }
+
+  /** Set one key and persist. Returns the updated document. */
+  async setContextKey(
+    runId: string,
+    key: string,
+    value: unknown,
+  ): Promise<RunContext> {
+    const current = await this.loadOrEmptyContext(runId);
+    const next = setContextValue(current, key, value);
+    await this.writeContext(next);
+    return next;
+  }
+
+  /**
+   * Delete one key and persist when present.
+   * @returns whether the key existed
+   */
+  async deleteContextKey(runId: string, key: string): Promise<boolean> {
+    const current = await this.loadOrEmptyContext(runId);
+    const { context, deleted } = deleteContextValue(current, key);
+    if (deleted) {
+      await this.writeContext(context);
+    }
+    return deleted;
   }
 }
 

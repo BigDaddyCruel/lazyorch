@@ -76,12 +76,30 @@ export {
 export {
   createDaemonHttpServer,
   tokensEqual,
+  hasValidBearer,
   readBody,
   MAX_BODY_BYTES,
   type DaemonHttpContext,
   type DaemonHttpServer,
   type StubRun,
 } from "./http-server.js";
+
+// --- context KV helpers ---
+export {
+  resolveRunContextStore,
+  parseActorRoleSafe,
+  resolveWriteActor,
+  withContextWriteLock,
+  loadWorkerWrite,
+  matchContextPath,
+  listContextResponse,
+  getContextResponse,
+  putContextKey,
+  deleteContextKey,
+  contextHttpStatus,
+  type ResolvedRunContext,
+  type ResolveRunContextResult,
+} from "./context-routes.js";
 
 // --- serve ---
 export {

@@ -50,6 +50,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@lazyorch/core':
+        specifier: workspace:*
+        version: link:../core
       '@lazyorch/shared':
         specifier: workspace:*
         version: link:../shared
@@ -70,6 +73,9 @@ importers:
 
   packages/daemon:
     dependencies:
+      '@lazyorch/core':
+        specifier: workspace:*
+        version: link:../core
       '@lazyorch/shared':
         specifier: workspace:*
         version: link:../shared

@@ -18,6 +18,19 @@ import {
   type ProjectRegistry,
   type RegisteredProject,
 } from "./project-registry.js";
+import { ContextKvError } from "@lazyorch/core";
+import {
+  contextHttpStatus,
+  deleteContextKey,
+  getContextResponse,
+  listContextResponse,
+  loadWorkerWrite,
+  matchContextPath,
+  putContextKey,
+  resolveRunContextStore,
+  resolveWriteActor,
+  withContextWriteLock,
+} from "./context-routes.js";
 
 /** Max JSON body size for stub POSTs (bytes). */
 export const MAX_BODY_BYTES = 64 * 1024;
@@ -134,6 +147,21 @@ export function tokensEqual(a: string, b: string): boolean {
   return timingSafeEqual(ba, bb);
 }
 
+/**
+ * True when Authorization carries a valid Bearer matching the daemon token.
+ * Independent of loopback optional-auth policy (used for context write ACL).
+ */
+export function hasValidBearer(
+  req: IncomingMessage,
+  token: string,
+): boolean {
+  const header = req.headers.authorization;
+  if (!header) return false;
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  if (!m || m[1] === undefined) return false;
+  return tokensEqual(m[1], token);
+}
+
 function checkAuth(
   req: IncomingMessage,
   ctx: DaemonHttpContext,
@@ -151,11 +179,7 @@ function checkAuth(
 
   if (!forceAuth) return true;
 
-  const header = req.headers.authorization;
-  if (!header) return false;
-  const m = /^Bearer\s+(.+)$/i.exec(header);
-  if (!m || m[1] === undefined) return false;
-  return tokensEqual(m[1], ctx.token);
+  return hasValidBearer(req, ctx.token);
 }
 
 function applyCors(req: IncomingMessage, res: ServerResponse): void {
@@ -166,7 +190,7 @@ function applyCors(req: IncomingMessage, res: ServerResponse): void {
     res.setHeader("Vary", "Origin");
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Authorization, Content-Type, Last-Event-ID",
+      "Authorization, Content-Type, Last-Event-ID, X-LazyOrch-Actor-Role",
     );
     res.setHeader(
       "Access-Control-Allow-Methods",
@@ -385,6 +409,13 @@ async function handleRequest(
     return;
   }
 
+  // --- shared context KV: /v1/runs/:id/context[/:key] ---
+  const contextMatch = matchContextPath(path);
+  if (contextMatch) {
+    await handleContextRequest(req, res, ctx, url, method, contextMatch);
+    return;
+  }
+
   if (method === "GET" && path === "/v1/adapters") {
     sendJson(res, 200, {
       adapters: [
@@ -445,6 +476,170 @@ async function handleRequest(
   }
 
   sendJson(res, 404, { error: "not_found", path, method });
+}
+
+async function handleContextRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: DaemonHttpContext,
+  url: URL,
+  method: string,
+  match: { runId: string; key?: string },
+): Promise<void> {
+  const projectId = url.searchParams.get("project") ?? undefined;
+  const resolveResult = await resolveRunContextStore(
+    ctx.registry,
+    match.runId,
+    projectId,
+  );
+  if (resolveResult.status === "not_found") {
+    sendJson(res, 404, {
+      error: "run_not_found",
+      message: `run not found: ${match.runId}`,
+      run_id: match.runId,
+      project_id: projectId ?? null,
+    });
+    return;
+  }
+  if (resolveResult.status === "ambiguous") {
+    sendJson(res, 409, {
+      error: "ambiguous_run",
+      message: `run id exists in multiple projects; pass ?project=`,
+      run_id: match.runId,
+      project_ids: resolveResult.project_ids,
+    });
+    return;
+  }
+  const resolved = resolveResult.resolved;
+
+  try {
+    if (method === "GET" && match.key === undefined) {
+      const doc = await resolved.store.loadOrEmptyContext(resolved.runId);
+      sendJson(res, 200, listContextResponse(doc));
+      return;
+    }
+
+    if (method === "GET" && match.key !== undefined) {
+      const doc = await resolved.store.loadOrEmptyContext(resolved.runId);
+      sendJson(res, 200, getContextResponse(doc, match.key));
+      return;
+    }
+
+    // --- writes: require Bearer; serialize per runId ---
+    const isWrite = method === "PUT" || method === "DELETE";
+    if (isWrite && match.key !== undefined) {
+      const bearerOk = hasValidBearer(req, ctx.token);
+      const actor = resolveWriteActor(
+        req.headers["x-lazyorch-actor-role"],
+        bearerOk,
+      );
+      if (!actor.ok) {
+        sendJson(res, actor.status, {
+          error: actor.error,
+          message: actor.message,
+        });
+        return;
+      }
+
+      if (method === "PUT") {
+        let raw: string;
+        try {
+          raw = await readBody(req);
+        } catch (err) {
+          const status =
+            typeof err === "object" &&
+            err !== null &&
+            "statusCode" in err &&
+            typeof (err as { statusCode: unknown }).statusCode === "number"
+              ? (err as { statusCode: number }).statusCode
+              : 500;
+          const msg = err instanceof Error ? err.message : String(err);
+          sendJson(res, status, {
+            error: status === 413 ? "payload_too_large" : "body_error",
+            message: msg,
+          });
+          return;
+        }
+        let body: { value?: unknown } = {};
+        if (raw.trim() !== "") {
+          try {
+            body = JSON.parse(raw) as typeof body;
+          } catch {
+            sendJson(res, 400, { error: "invalid_json" });
+            return;
+          }
+        }
+        if (!body || typeof body !== "object" || !("value" in body)) {
+          sendJson(res, 400, {
+            error: "missing_value",
+            message: 'body must be { "value": ... }',
+          });
+          return;
+        }
+        const workerWrite = await loadWorkerWrite(resolved.project.repo_root);
+        const doc = await withContextWriteLock(resolved.runId, () =>
+          putContextKey(
+            resolved.store,
+            resolved.runId,
+            match.key!,
+            body.value,
+            actor.role,
+            workerWrite,
+          ),
+        );
+        sendJson(res, 200, {
+          run_id: doc.run_id,
+          key: match.key,
+          value: doc.kv[match.key],
+          updated_at: doc.updated_at,
+        });
+        return;
+      }
+
+      // DELETE
+      const workerWrite = await loadWorkerWrite(resolved.project.repo_root);
+      const result = await withContextWriteLock(resolved.runId, () =>
+        deleteContextKey(
+          resolved.store,
+          resolved.runId,
+          match.key!,
+          actor.role,
+          workerWrite,
+        ),
+      );
+      if (!result.deleted) {
+        sendJson(res, 404, {
+          error: "not_found",
+          message: `context key not found: ${match.key}`,
+          key: match.key,
+        });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        run_id: resolved.runId,
+        key: match.key,
+        deleted: true,
+      });
+      return;
+    }
+
+    sendJson(res, 405, {
+      error: "method_not_allowed",
+      message: `${method} not allowed on this context path`,
+      method,
+      path: url.pathname,
+    });
+  } catch (err) {
+    if (err instanceof ContextKvError) {
+      sendJson(res, contextHttpStatus(err), {
+        error: err.code,
+        message: err.message,
+      });
+      return;
+    }
+    throw err;
+  }
 }
 
 function handleSse(

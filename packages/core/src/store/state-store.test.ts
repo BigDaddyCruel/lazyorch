@@ -166,5 +166,37 @@ describe("StateStore", () => {
     expect(await store.readPlan("run_missing")).toBeNull();
     expect(await store.listTasks("run_missing")).toEqual([]);
     expect(await store.readGates("run_missing")).toEqual([]);
+    expect(await store.readContext("run_missing")).toBeNull();
+  });
+
+  it("round-trips shared context KV on context.json", async () => {
+    const root = await mkdtemp(join(tmpdir(), "lazyorch-state-ctx-"));
+    const store = new StateStore(root);
+    const runId = generateId("run");
+
+    expect(await store.readContext(runId)).toBeNull();
+
+    const empty = await store.loadOrEmptyContext(runId);
+    expect(empty.run_id).toBe(runId);
+    expect(empty.kv).toEqual({});
+
+    const afterSet = await store.setContextKey(runId, "port", 3000);
+    expect(afterSet.kv.port).toBe(3000);
+    expect(await store.readContext(runId)).toEqual(afterSet);
+
+    await store.setContextKey(runId, "model_pin/worker", "claude");
+    const loaded = await store.readContext(runId);
+    expect(loaded?.kv).toEqual({ port: 3000, "model_pin/worker": "claude" });
+
+    // atomic write leaves pretty JSON on disk
+    const raw = await readFile(store.contextPath(runId), "utf8");
+    expect(raw.endsWith("\n")).toBe(true);
+    expect(JSON.parse(raw).kv.port).toBe(3000);
+
+    expect(await store.deleteContextKey(runId, "port")).toBe(true);
+    expect((await store.readContext(runId))?.kv).toEqual({
+      "model_pin/worker": "claude",
+    });
+    expect(await store.deleteContextKey(runId, "port")).toBe(false);
   });
 });

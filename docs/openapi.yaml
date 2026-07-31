@@ -4,6 +4,7 @@ info:
   description: |
     HTTP API for the LazyOrch user-level daemon (loopback).
     PR-06 stubs: health, projects, runs list, adapters, models/route, SSE events.
+    PR-14: shared run context KV under /v1/runs/:id/context.
     Full schemas land with later PRs.
   version: 0.1.0
 servers:
@@ -106,6 +107,111 @@ paths:
       responses:
         "200":
           description: Routing decision stub
+  /v1/runs/{id}/context:
+    get:
+      summary: List shared context KV for a run
+      operationId: listRunContext
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: project
+          in: query
+          description: Optional project id to disambiguate multi-project daemons
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Context keys + kv map
+        "404":
+          description: Run not found
+  /v1/runs/{id}/context/{key}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: key
+        in: path
+        required: true
+        description: Context key (may include `/` for namespaced keys, e.g. model_pin/worker)
+        schema:
+          type: string
+      - name: project
+        in: query
+        schema:
+          type: string
+    get:
+      summary: Get one context key
+      operationId: getRunContextKey
+      responses:
+        "200":
+          description: Key value
+        "404":
+          description: Run or key not found
+    put:
+      summary: Set context key (body `{ "value": ... }`)
+      description: |
+        Write ACL: Bearer required (even on loopback). system/human/lead always write;
+        worker only when `context.worker_write: true`; reviewer/qa/plan roles read-only.
+        Missing `X-LazyOrch-Actor-Role` with Bearer defaults to human. Role claims remain
+        client-asserted until session identity is wired (TODO). Document caps: 512 keys,
+        128 KiB total kv JSON, 16 KiB per value.
+      operationId: putRunContextKey
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: X-LazyOrch-Actor-Role
+          in: header
+          schema:
+            type: string
+            enum: [system, human, lead, worker, reviewer, qa, plan_writer, plan_reviewer]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: {}
+      responses:
+        "200":
+          description: Key set
+        "401":
+          description: Bearer required for writes
+        "403":
+          description: Role cannot write
+        "404":
+          description: Run not found
+        "409":
+          description: Ambiguous run id across projects
+        "413":
+          description: Value or document quota exceeded
+    delete:
+      summary: Delete context key
+      operationId: deleteRunContextKey
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: X-LazyOrch-Actor-Role
+          in: header
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+        "401":
+          description: Bearer required for writes
+        "403":
+          description: Role cannot write
+        "404":
+          description: Run or key not found
+        "409":
+          description: Ambiguous run id across projects
   /v1/events:
     get:
       summary: Server-Sent Events stream (ephemeral live fan-out)
