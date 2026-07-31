@@ -39,6 +39,12 @@ export const AdapterRegistryEntrySchema = z.object({
   args_prefix: z.array(z.string()).optional(),
   version_args: z.array(z.string()).optional(),
   version_floor: z.string().optional(),
+  /**
+   * Optional argv for model-list probe (PR-22), e.g. `["models"]` for opencode.
+   * When set, adapter.listModels() may exec the binary; otherwise uses
+   * capabilities.models / tier_map.
+   */
+  models_args: z.array(z.string()).optional(),
   enabled: z.boolean().default(true),
   source: AdapterSourceSchema.default("user_config"),
   candidates: z.array(z.string()).optional(),

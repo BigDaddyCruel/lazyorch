@@ -203,6 +203,7 @@ async function resolveBuiltin(
     if (entry.version_floor) reg.version_floor = entry.version_floor;
     if (entry.args_prefix) reg.args_prefix = [...entry.args_prefix];
     if (entry.start_template) reg.start_template = entry.start_template;
+    if (entry.models_args) reg.models_args = [...entry.models_args];
     if (binary_path !== undefined) reg.binary_path = binary_path;
     if (unbound) reg.unbound = true;
     out.push(reg);
@@ -328,6 +329,9 @@ async function resolveUserEntry(
 
   if (entry.version_floor) reg.version_floor = entry.version_floor;
   else if (catalog?.version_floor) reg.version_floor = catalog.version_floor;
+
+  if (entry.models_args) reg.models_args = [...entry.models_args];
+  else if (catalog?.models_args) reg.models_args = [...catalog.models_args];
 
   if (entry.env) reg.env = { ...entry.env };
   if (entry.start_template) reg.start_template = entry.start_template;

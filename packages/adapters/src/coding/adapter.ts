@@ -2,7 +2,9 @@
  * First-class coding CLI adapter (claude / codex / agy / grok).
  * Maps AgentSession → argv/env/stdio; runner owns timeout/stall/tree-kill.
  *
- * Modes: live | fake | record (see fake.ts). Thin usage parse from stdio.log.
+ * Modes: live | fake | record (see fake.ts).
+ * Best-effort usage parse from stdio.log (PR-22: JSONL/cache/cost depth).
+ * listModels: capabilities.models → optional models_args probe → tier_map.
  */
 
 import { mkdir, writeFile } from "node:fs/promises";
@@ -36,6 +38,7 @@ import {
   type FirstClassCodingId,
 } from "./profiles.js";
 import { parseUsageFromLog } from "./usage.js";
+import { resolveModelList } from "./models-probe.js";
 
 export class CodingAdapterError extends Error {
   readonly code:
@@ -152,8 +155,24 @@ export class CodingCliAdapter implements AgentAdapter {
     return probeAdapter(this.reg, probeOpts);
   }
 
+  /**
+   * Configured models first; else live probe via models_args (registration or
+   * profile); else unique tier_map values. Fake mode skips the live probe.
+   */
   async listModels(): Promise<string[]> {
-    return [...this.reg.capabilities.models];
+    const modelsArgs =
+      this.reg.models_args ??
+      (this.profile.models_args
+        ? [...this.profile.models_args]
+        : undefined);
+    const probeOpts: {
+      skip_probe?: boolean;
+      exec?: ExecImpl;
+    } = {
+      skip_probe: this.mode === "fake" || this.reg.unbound === true,
+    };
+    if (this.execImpl) probeOpts.exec = this.execImpl;
+    return resolveModelList(this.reg, modelsArgs, probeOpts);
   }
 
   /**

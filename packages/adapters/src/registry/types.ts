@@ -31,6 +31,11 @@ export interface AdapterRegistration {
   args_prefix?: string[];
   version_args?: string[];
   version_floor?: string;
+  /**
+   * Optional argv for model-list probe (PR-22), e.g. `["models"]`.
+   * When set, listModels may exec the binary; see coding/models-probe.ts.
+   */
+  models_args?: string[];
   enabled: boolean;
   /** How the entry was found. v1 enum only (KD-39). */
   source: AdapterSource;
@@ -40,6 +45,10 @@ export interface AdapterRegistration {
    * Generic/shell: command template for start.
    * Placeholders: {cwd} {model} {prompt_file} {session_dir} {timeout_ms}
    *   {binary} {args_prefix} {agent_id} {task_id}
+   *
+   * Registering custom CLIs: copy an entry from USER_ADAPTER_TEMPLATES
+   * (aider, opencode) or set start_template via `lazyorch adapter register`.
+   * See registry/user-templates.ts for full placeholder docs.
    */
   start_template?: string;
   /** Candidate binary names used during discovery (not always on final reg). */
@@ -63,6 +72,8 @@ export interface BuiltinCatalogEntry {
   kind: "llm" | "deterministic";
   version_args: string[];
   version_floor?: string;
+  /** Optional model-list probe argv (PR-22). */
+  models_args?: string[];
   capabilities: AdapterCapabilities;
   /** Optional default start_template for thin generic invoke (PR-09 deepens). */
   start_template?: string;

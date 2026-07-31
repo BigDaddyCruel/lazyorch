@@ -69,3 +69,14 @@ export {
   templateToArgv,
   type TemplateVars,
 } from "./generic.js";
+
+export {
+  USER_ADAPTER_TEMPLATES,
+  getUserAdapterTemplate,
+  listUserAdapterTemplates,
+  userTemplateToRegistryEntry,
+  formatUserTemplateHelp,
+  isUserAdapterTemplateId,
+  type UserAdapterTemplate,
+  type UserAdapterTemplateId,
+} from "./user-templates.js";

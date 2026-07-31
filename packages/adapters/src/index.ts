@@ -1,6 +1,7 @@
 /**
  * @lazyorch/adapters — session runner (KD-40), shell adapter, budget hours,
- * adapter registry + discovery (PR-08), first-class coding adapters (PR-09).
+ * adapter registry + discovery (PR-08), first-class coding adapters (PR-09),
+ * capability deepening + user templates (PR-22).
  */
 export const PACKAGE_NAME = "@lazyorch/adapters" as const;
 
@@ -126,6 +127,12 @@ export {
   createGenericAdapter,
   splitTemplateArgv,
   templateToArgv,
+  USER_ADAPTER_TEMPLATES,
+  getUserAdapterTemplate,
+  listUserAdapterTemplates,
+  userTemplateToRegistryEntry,
+  formatUserTemplateHelp,
+  isUserAdapterTemplateId,
   type AdapterCapabilities,
   type AdapterRegistration,
   type AdapterHealthRow,
@@ -145,6 +152,8 @@ export {
   type HealthOptions,
   type AdapterRegistryOptions,
   type TemplateVars,
+  type UserAdapterTemplate,
+  type UserAdapterTemplateId,
 } from "./registry/index.js";
 
 export {
@@ -166,7 +175,15 @@ export {
   CodingArgvError,
   parseUsageFromText,
   parseUsageFromLog,
+  parseUsageFromFreeText,
   usageFromJsonObject,
+  mergeUsage,
+  preferRicherUsage,
+  parseModelListFromText,
+  modelsFromJsonValue,
+  modelsFromRegistration,
+  probeModelList,
+  resolveModelList,
   CODING_PROFILES,
   FIRST_CLASS_CODING_IDS,
   getCodingProfile,
@@ -183,6 +200,7 @@ export {
   type CodingRunMode,
   type RecordedStart,
   type FakeSessionResultFactory,
+  type ModelListProbeOptions,
 } from "./coding/index.js";
 
 export {

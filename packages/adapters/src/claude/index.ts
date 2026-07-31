@@ -30,7 +30,7 @@ export function claudeRegistration(
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.claude },
       effort_flag: true,
-      usage_reporting: "tokens",
+      usage_reporting: "tokens_and_cost",
     }),
     start_template: CLAUDE_PROFILE.default_start_template,
     unbound: false,

@@ -22,8 +22,20 @@ export {
 export {
   parseUsageFromText,
   parseUsageFromLog,
+  parseUsageFromFreeText,
   usageFromJsonObject,
+  mergeUsage,
+  preferRicherUsage,
 } from "./usage.js";
+
+export {
+  parseModelListFromText,
+  modelsFromJsonValue,
+  modelsFromRegistration,
+  probeModelList,
+  resolveModelList,
+  type ModelListProbeOptions,
+} from "./models-probe.js";
 
 export {
   CODING_PROFILES,

@@ -4,6 +4,11 @@
  * First-class builtins use CodingCliAdapter (PR-09).
  *
  * Does not own timeout/stall/cancel process-tree kill (session runner).
+ * No usage parse (stdio.log capture only) — see design thin matrix.
+ *
+ * Example registry entries: USER_ADAPTER_TEMPLATES in user-templates.ts
+ * (aider, opencode). Register via config adapters.registry[] or
+ * `lazyorch adapter register --id … --binary … --start-template "…"`.
  */
 
 import { mkdir } from "node:fs/promises";
@@ -20,6 +25,7 @@ import { probeAdapter, type ExecImpl } from "./probe.js";
 import type { AdapterRegistration } from "./types.js";
 import type { SpawnImpl, SpawnedProcess } from "../shell/adapter.js";
 import { defaultSpawnImpl } from "../shell/adapter.js";
+import { resolveModelList } from "../coding/models-probe.js";
 
 export class GenericAdapterError extends Error {
   readonly code:
@@ -149,8 +155,13 @@ export class GenericCliAdapter implements AgentAdapter {
     return probeAdapter(this.reg, probeOpts);
   }
 
+  /**
+   * capabilities.models → optional models_args probe → tier_map values.
+   * User templates (e.g. opencode) set models_args: ["models"].
+   */
   async listModels(): Promise<string[]> {
-    return [...this.reg.capabilities.models];
+    const probeOpts = this.execImpl ? { exec: this.execImpl } : {};
+    return resolveModelList(this.reg, this.reg.models_args, probeOpts);
   }
 
   async start(session: AgentSession): Promise<RunningAgent> {

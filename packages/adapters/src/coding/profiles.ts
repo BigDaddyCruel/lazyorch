@@ -1,6 +1,8 @@
 /**
  * Vendor profiles for first-class coding adapters (PR-09).
- * Model flag templates + invoke argv shape; usage parse is thin/best-effort.
+ * Model flag templates + invoke argv shape.
+ * Usage parse is best-effort (PR-22 deepens JSONL/cache/cost coverage).
+ * Optional models_args enable live model-list probes when the CLI supports them.
  */
 
 import type { EffortLevel } from "../types.js";
@@ -53,6 +55,12 @@ export interface CodingAdapterProfile {
   usage_reporting: UsageReporting;
   /** Catalog start_template (documentation + generic fallback). */
   default_start_template: string;
+  /**
+   * Optional model-list probe argv (PR-22). Empty/undefined → no live probe;
+   * listModels uses capabilities.models or tier_map values.
+   * First-class CLIs often lack a stable list command — leave unset.
+   */
+  models_args?: readonly string[];
 }
 
 const EFFORT_VALUES: readonly EffortLevel[] = ["low", "medium", "high"];
@@ -74,7 +82,8 @@ export const CODING_PROFILES: Record<
     mid_args: ["--print", "--permission-mode", "bypassPermissions"],
     effort_flag_template: "--effort {effort}",
     prompt_style: "positional",
-    usage_reporting: "tokens",
+    // JSONL result events often include total_cost_usd (PR-22).
+    usage_reporting: "tokens_and_cost",
     default_start_template:
       "{binary} --model {model} --print --permission-mode bypassPermissions {prompt_file}",
   },
