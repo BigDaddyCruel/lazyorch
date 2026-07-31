@@ -1,9 +1,92 @@
 /**
- * @lazyorch/adapters — registry + claude, codex, agy, grok, shell, generic.
- * Placeholder package; domain logic lands in later PRs.
+ * @lazyorch/adapters — session runner (KD-40), shell adapter, budget hours stub.
+ * PR-07 foundation; registry + coding adapters land in PR-08/09.
  */
 export const PACKAGE_NAME = "@lazyorch/adapters" as const;
 
-export function adaptersPlaceholder(): string {
-  return PACKAGE_NAME;
-}
+export type {
+  AdapterId,
+  SessionKind,
+  SessionStatus,
+  EffortLevel,
+  ApprovalPolicy,
+  Usage,
+  DoctorResult,
+  ContextBundle,
+  SessionTaskBlob,
+  ReviewDecision,
+  QaDecision,
+  WorkerMarker,
+  StructuredDecision,
+  SessionResult,
+  RunningAgent,
+  AgentSession,
+  AgentAdapter,
+  SessionRecord,
+  SessionsFile,
+  SessionMeta,
+} from "./types.js";
+
+export { scrubEnv, scrubText, isSecretEnvKey } from "./scrub.js";
+export { killProcessTree, type KillTreeOptions } from "./process-tree.js";
+
+export {
+  createSessionRunner,
+  generateRunHandle,
+  projectRunDir,
+  SessionRunnerError,
+  materializeSession,
+  buildPromptMarkdown,
+  substituteStartTemplate,
+  emptySkillLoader,
+  mapSessionResultToTaskEffect,
+  decisionSummary,
+  parseStructuredDecision,
+  parseLastStdoutJsonLine,
+  resolveStructuredDecision,
+  readResultJsonFile,
+  resultJsonPath,
+  BudgetHoursTracker,
+  sessionsFilePath,
+  runSessionsDir,
+  sessionDirFor,
+  emptySessionsFile,
+  readSessionsFile,
+  writeSessionsFile,
+  registerSession,
+  updateSessionRecord,
+  clearSession,
+  countRunningSessions,
+  type SessionRunner,
+  type SessionRunnerOptions,
+  type StartSessionParams,
+  type ManagedRunningAgent,
+  type SkillLoader,
+  type MaterializeOptions,
+  type MaterializeResult,
+  type TaskFsmEffect,
+  type MappedTaskStatus,
+  type MapResultOptions,
+  type BudgetHoursLimits,
+  type BudgetHoursSnapshot,
+  type BudgetHardStopResult,
+  type BudgetStopReason,
+  type BudgetHoursTrackerOptions,
+  type SessionHoursEntry,
+} from "./runner/index.js";
+
+export {
+  ShellAdapter,
+  ShellAdapterError,
+  createShellAdapter,
+  defaultSpawnImpl,
+  checkShellAllowlist,
+  commandNameFromArgv,
+  DEFAULT_SHELL_ALLOWLIST,
+  type ShellAdapterOptions,
+  type SpawnImpl,
+  type SpawnRequest,
+  type SpawnedProcess,
+  type ShellAllowlistConfig,
+  type AllowlistResult,
+} from "./shell/index.js";
