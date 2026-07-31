@@ -4,6 +4,16 @@
 
 import type { AdaptersConfig } from "@lazyorch/shared";
 import {
+  createCodingAdapter,
+  isFirstClassCodingId,
+  modeAllowsUnbound,
+  resolveRunMode,
+  type CodingAdapterOptions,
+  type CodingCliAdapter,
+  type CodingRunMode,
+  type StartRecorder,
+} from "../coding/index.js";
+import {
   createShellAdapter,
   type ShellAdapter,
   type ShellAdapterOptions,
@@ -28,11 +38,23 @@ import type {
 import type { DoctorResult } from "../types.js";
 
 export interface AdapterRegistryOptions extends ResolveRegistryOptions {
-  /** Injected spawn for generic/shell adapters in tests. */
+  /** Injected spawn for generic/shell/coding adapters in tests. */
   spawnImpl?: SpawnImpl;
   /** Injected version exec for probes. */
   execImpl?: ExecImpl;
   shell?: ShellAdapterOptions;
+  /**
+   * Run mode for first-class coding adapters (claude/codex/agy/grok).
+   * Default live; use `fake` for CI without LLM CLIs.
+   */
+  codingMode?: CodingRunMode;
+  /** Shared start recorder for coding adapters (fake/record). */
+  codingRecorder?: StartRecorder;
+  /** Extra coding adapter options (fakeResult, skip_usage_parse, …). */
+  coding?: Omit<
+    CodingAdapterOptions,
+    "registration" | "spawnImpl" | "execImpl" | "mode" | "recorder"
+  >;
 }
 
 export class AdapterRegistry {
@@ -114,10 +136,22 @@ export class AdapterRegistry {
   }
 
   /**
+   * Effective coding run mode: options.codingMode > LAZYORCH_ADAPTER_MODE > live.
+   * Used for both unbound gate and CodingCliAdapter construction.
+   */
+  effectiveCodingMode(): CodingRunMode {
+    return resolveRunMode(this.options.codingMode);
+  }
+
+  /**
    * Create a runtime AgentAdapter.
    * - shell → ShellAdapter (always; ignores registry overlays)
-   * - others with start_template → GenericCliAdapter (thin; PR-09 deepens builtins)
-   * - unbound / no template → null
+   * - first-class coding (claude/codex/agy/grok) → CodingCliAdapter
+   * - others with start_template → GenericCliAdapter
+   * - unbound (live/record) / no template → null
+   *
+   * Fake mode (options or LAZYORCH_ADAPTER_MODE=fake): first-class coding
+   * adapters may be created even when unbound.
    */
   createAdapter(id: string): AgentAdapter | null {
     // Shell is hard-wired: never GenericCliAdapter, never null due to overlay.
@@ -137,6 +171,24 @@ export class AdapterRegistry {
     const reg = this.get(id);
     if (!reg || !reg.enabled) return null;
 
+    // First-class coding adapters (PR-09).
+    if (isFirstClassCodingId(id)) {
+      const codingMode = this.effectiveCodingMode();
+      // live + record require bound binary; fake allows unbound (CI).
+      if (reg.unbound && !modeAllowsUnbound(codingMode)) return null;
+      const codingOpts: Omit<CodingAdapterOptions, "registration"> = {
+        ...(this.options.coding ?? {}),
+      };
+      if (this.options.spawnImpl) codingOpts.spawnImpl = this.options.spawnImpl;
+      if (this.options.execImpl) codingOpts.execImpl = this.options.execImpl;
+      // Always pass resolved mode so adapter matches unbound gate (incl. env).
+      codingOpts.mode = codingMode;
+      if (this.options.codingRecorder) {
+        codingOpts.recorder = this.options.codingRecorder;
+      }
+      return createCodingAdapter(reg, codingOpts);
+    }
+
     if (reg.unbound) return null;
     if (!reg.start_template) return null;
 
@@ -150,11 +202,25 @@ export class AdapterRegistry {
   }
 
   /**
+   * Create a typed first-class coding adapter, or null.
+   */
+  createCoding(id: string): CodingCliAdapter | null {
+    if (!isFirstClassCodingId(id)) return null;
+    const adapter = this.createAdapter(id);
+    if (adapter && isFirstClassCodingId(adapter.id)) {
+      return adapter as CodingCliAdapter;
+    }
+    return null;
+  }
+
+  /**
    * Prefer createAdapter; returns typed generic when applicable.
+   * Does not return CodingCliAdapter (use createCoding).
    */
   createGeneric(id: string): GenericCliAdapter | null {
+    if (id === "shell" || isFirstClassCodingId(id)) return null;
     const adapter = this.createAdapter(id);
-    if (adapter && adapter.id !== "shell") {
+    if (adapter && adapter.id !== "shell" && !isFirstClassCodingId(adapter.id)) {
       return adapter as GenericCliAdapter;
     }
     return null;

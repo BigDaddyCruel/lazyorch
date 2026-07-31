@@ -1,6 +1,6 @@
 /**
  * @lazyorch/adapters — session runner (KD-40), shell adapter, budget hours,
- * adapter registry + discovery (PR-08). Coding adapter depth lands in PR-09.
+ * adapter registry + discovery (PR-08), first-class coding adapters (PR-09).
  */
 export const PACKAGE_NAME = "@lazyorch/adapters" as const;
 
@@ -27,7 +27,14 @@ export type {
   SessionMeta,
 } from "./types.js";
 
-export { scrubEnv, scrubText, isSecretEnvKey } from "./scrub.js";
+export {
+  scrubEnv,
+  scrubText,
+  scrubCodingSpawnEnv,
+  isSecretEnvKey,
+  isCodingVendorEnvKey,
+  CODING_VENDOR_ENV_ALLOWLIST,
+} from "./scrub.js";
 export { killProcessTree, type KillTreeOptions } from "./process-tree.js";
 
 export {
@@ -146,3 +153,55 @@ export {
   quoteWindowsArg,
   type ResolvedSpawnTarget,
 } from "./spawn-policy.js";
+
+export {
+  CodingCliAdapter,
+  CodingAdapterError,
+  createCodingAdapter,
+  createCodingAdapterForId,
+  buildCodingArgv,
+  expandFlagTemplate,
+  resolveCodingBinary,
+  isUsableModelId,
+  CodingArgvError,
+  parseUsageFromText,
+  parseUsageFromLog,
+  usageFromJsonObject,
+  CODING_PROFILES,
+  FIRST_CLASS_CODING_IDS,
+  getCodingProfile,
+  isFirstClassCodingId,
+  isEffortLevel,
+  StartRecorder,
+  defaultFakeResult,
+  resolveRunMode,
+  modeAllowsUnbound,
+  type CodingAdapterOptions,
+  type BuildCodingArgvOptions,
+  type CodingAdapterProfile,
+  type FirstClassCodingId,
+  type CodingRunMode,
+  type RecordedStart,
+  type FakeSessionResultFactory,
+} from "./coding/index.js";
+
+export {
+  createClaudeAdapter,
+  claudeRegistration,
+  CLAUDE_PROFILE,
+} from "./claude/index.js";
+export {
+  createCodexAdapter,
+  codexRegistration,
+  CODEX_PROFILE,
+} from "./codex/index.js";
+export {
+  createAgyAdapter,
+  agyRegistration,
+  AGY_PROFILE,
+} from "./agy/index.js";
+export {
+  createGrokAdapter,
+  grokRegistration,
+  GROK_PROFILE,
+} from "./grok/index.js";

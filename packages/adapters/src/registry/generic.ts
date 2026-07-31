@@ -1,7 +1,7 @@
 /**
  * Thin generic CLI adapter — start_template → argv spawn.
- * Used for user-registered tools (aider, opencode, …) and as a thin
- * stand-in for builtins until PR-09 deepens vendor-specific flags/usage.
+ * Used for user-registered tools (aider, opencode, …).
+ * First-class builtins use CodingCliAdapter (PR-09).
  *
  * Does not own timeout/stall/cancel process-tree kill (session runner).
  */

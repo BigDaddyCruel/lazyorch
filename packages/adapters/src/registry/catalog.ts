@@ -1,9 +1,13 @@
 /**
  * Builtin first-class adapter catalog (claude, codex, agy, grok, shell).
- * Candidates and thin capability defaults; deep usage/model list is PR-09/22.
+ * Candidates + capability defaults. Coding start depth is PR-09 (CodingCliAdapter).
+ *
+ * Default start_template strings for coding ids come from CODING_PROFILES
+ * (single source of truth — do not hardcode templates here).
  */
 
 import type { ModelTier } from "@lazyorch/shared";
+import { CODING_PROFILES } from "../coding/profiles.js";
 import type {
   AdapterCapabilities,
   BuiltinCatalogEntry,
@@ -99,11 +103,10 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.claude },
       effort_flag: true,
-      usage_reporting: "none",
+      usage_reporting: "tokens",
     }),
-    // Thin argv template (no shell redirects). PR-09 deepens vendor flags/usage.
-    start_template:
-      "{binary} --model {model} --print --permission-mode bypassPermissions {prompt_file}",
+    // Single source: CODING_PROFILES (programmatic argv + custom-template detect).
+    start_template: CODING_PROFILES.claude.default_start_template,
   },
   {
     id: "codex",
@@ -113,9 +116,9 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
     version_args: ["--version"],
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.codex },
-      usage_reporting: "none",
+      usage_reporting: "tokens",
     }),
-    start_template: "{binary} exec --model {model} {prompt_file}",
+    start_template: CODING_PROFILES.codex.default_start_template,
   },
   {
     id: "agy",
@@ -128,7 +131,7 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
       usage_reporting: "none",
     }),
     // Best-effort model flag; bind via config binary when PATH fails.
-    start_template: "{binary} --model {model} {prompt_file}",
+    start_template: CODING_PROFILES.agy.default_start_template,
   },
   {
     id: "grok",
@@ -138,9 +141,9 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
     version_args: ["--version"],
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.grok },
-      usage_reporting: "none",
+      usage_reporting: "tokens",
     }),
-    start_template: "{binary} --model {model} {prompt_file}",
+    start_template: CODING_PROFILES.grok.default_start_template,
   },
   {
     id: "shell",
