@@ -7,6 +7,7 @@
  * PR-12: scheduler, slots, elastic workers (+ router at assign).
  * PR-13: team manager, skills, preferred_adapters, role-template matching.
  * PR-14: shared run context KV (context.json + write ACL).
+ * PR-15: planning handlers + multi-adapter sessions + plan gates.
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
 
@@ -97,6 +98,7 @@ export {
 export {
   FakePlanWriter,
   FakePlanReviewer,
+  FakePlanningSession,
   DEFAULT_REQUIRED_SECTIONS,
   extractHeadings,
   headingMatches,
@@ -126,8 +128,43 @@ export {
   supersedeOpenTasks,
   prepareReplan,
   resumeAfterReplan,
+  // plan gates
+  PLAN_MAX_ROUNDS_ACTIONS,
+  createPlanApproveGate,
+  createPlanDisputeGate,
+  createPlanMaxRoundsGate,
+  resolveGate,
+  applyPlanApproveDecision,
+  applyPlanDisputeDecision,
+  applyPlanMaxRoundsDecision,
+  shouldOpenPlanApproveGate,
+  // router + session handlers
+  planningSignals,
+  routePlanningSession,
+  SessionPlanWriter,
+  SessionPlanReviewer,
+  runPlanningPhase,
   type PlanWriterPort,
   type PlanReviewerPort,
+  type PlanningRole,
+  type PlanningSessionPort,
+  type PlanningSessionRequest,
+  type PlanningSessionOutcome,
+  type PlanningRoutingOptions,
+  type FakeSessionHandler,
+  type PlanMaxRoundsAction,
+  type PlanRejectAction,
+  type PlanDisputeResolution,
+  type CreatePlanGateBase,
+  type ResolvePlanApproveResult,
+  type ResolvePlanDisputeResult,
+  type ResolvePlanMaxRoundsResult,
+  type RoutePlanningSessionParams,
+  type SessionHandlerBase,
+  type SessionPlanWriterOptions,
+  type SessionPlanReviewerOptions,
+  type RunPlanningPhaseParams,
+  type PlanningPhaseResult,
   type PlanTaskDraft,
   type OverlappingScope,
   type TaskDagMeta,
@@ -338,6 +375,7 @@ export {
   // team manager
   buildTeam,
   mintWorkerAgent,
+  mintPlanAgent,
   findAgent,
   agentsByRole,
   preferredAdaptersForAgent,

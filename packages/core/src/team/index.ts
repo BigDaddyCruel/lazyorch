@@ -66,6 +66,7 @@ export {
 export {
   buildTeam,
   mintWorkerAgent,
+  mintPlanAgent,
   findAgent,
   agentsByRole,
   preferredAdaptersForAgent,
