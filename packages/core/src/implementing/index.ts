@@ -1,6 +1,6 @@
 /**
  * Implementing phase: assign/review/integrate loop, forge mutex (KD-33/34),
- * escalate on retry, replan hooks, terminal-failed policy (KD-36).
+ * escalate on retry, run-level QA, replan hooks, terminal-failed policy (KD-36).
  */
 
 export type {
@@ -12,6 +12,9 @@ export type {
   ReviewerSessionRequest,
   ReviewerSessionOutcome,
   ReviewerSessionPort,
+  QaSessionRequest,
+  QaSessionOutcome,
+  QaSessionPort,
   ForgeIntegrateStatus,
   ForgeIntegrateRequest,
   ForgeIntegrateResult,
@@ -71,4 +74,18 @@ export {
   FakeForgeIntegrate,
   FakeWorkerSession,
   FakeReviewerSession,
+  FakeQaSession,
 } from "./fakes.js";
+
+export {
+  needsRunLevelQa,
+  candidatesForRunLevelQa,
+  applyQaPass,
+  invalidateRunQa,
+  createDynamicFixTasks,
+  applyQaOutcome,
+  canExitAfterQa,
+  type DynamicFixReason,
+  type CreateDynamicFixTasksOpts,
+  type ApplyQaOutcomeResult,
+} from "./qa.js";

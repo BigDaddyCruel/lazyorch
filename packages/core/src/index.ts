@@ -9,6 +9,7 @@
  * PR-14: shared run context KV (context.json + write ACL).
  * PR-15: planning handlers + multi-adapter sessions + plan gates.
  * PR-16: Implementing phase (assign/review/integrate, forge mutex, escalate).
+ * PR-17: Run-level QA + PrePR/CILoop/MergeReady lifecycle + merge gate.
  */
 export const PACKAGE_NAME = "@lazyorch/core" as const;
 
@@ -424,6 +425,14 @@ export {
   FakeForgeIntegrate,
   FakeWorkerSession,
   FakeReviewerSession,
+  FakeQaSession,
+  needsRunLevelQa,
+  candidatesForRunLevelQa,
+  applyQaPass,
+  invalidateRunQa,
+  createDynamicFixTasks,
+  applyQaOutcome,
+  canExitAfterQa,
   type WorkerOutcomeKind,
   type WorkerSessionRequest,
   type WorkerSessionOutcome,
@@ -432,6 +441,9 @@ export {
   type ReviewerSessionRequest,
   type ReviewerSessionOutcome,
   type ReviewerSessionPort,
+  type QaSessionRequest,
+  type QaSessionOutcome,
+  type QaSessionPort,
   type ForgeIntegrateStatus,
   type ForgeIntegrateRequest,
   type ForgeIntegrateResult,
@@ -449,7 +461,46 @@ export {
   type CreateHumanInterventionGateOpts,
   type ImplementingTickParams,
   type ImplementingTickResult,
+  type DynamicFixReason,
+  type CreateDynamicFixTasksOpts,
+  type ApplyQaOutcomeResult,
 } from "./implementing/index.js";
+
+export {
+  FakeForgeGithub,
+  applyEnsureReadyResult,
+  runPrePrPhase,
+  runPrOpenPhase,
+  withPrRef,
+  runCiLoopTick,
+  createMergeGate,
+  hasPendingMergeGate,
+  applyMergeGateDecision,
+  applyMerged,
+  shouldAutoMerge,
+  resolvePendingMergeGates,
+  applyChangesRequested,
+  lifecycleTick,
+  type MergeMethod,
+  type EnsureReadyPrPortRequest,
+  type EnsureReadyPrPortResult,
+  type PollChecksPortRequest,
+  type PollChecksPortResult,
+  type MergePrPortRequest,
+  type MergePrPortResult,
+  type ForgeGithubPort,
+  type PrePrConfig,
+  type RunPrePrResult,
+  type CiLoopConfig,
+  type RunCiLoopResult,
+  type CreateMergeGateOpts,
+  type MergeGateDecision,
+  type ApplyMergeGateDecisionResult,
+  type ApplyChangesRequestedOpts,
+  type ApplyChangesRequestedResult,
+  type LifecycleTickParams,
+  type LifecycleTickResult,
+} from "./lifecycle/index.js";
 
 export {
   BUILTIN_SKILL_IDS,

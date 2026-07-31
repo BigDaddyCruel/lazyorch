@@ -73,7 +73,7 @@ describe("integrateOne (KD-33/34)", () => {
     locks.tryAcquire("tsk_a", ["src/a/**"]);
 
     const r = await integrateOne({
-      run: run(),
+      run: run({ qa: { passed_at_commit: "old_tip" } }),
       task: task({ id: "tsk_a", status: "integrating" }),
       forge,
       mutex,
@@ -82,11 +82,29 @@ describe("integrateOne (KD-33/34)", () => {
 
     expect(r.task.status).toBe("done");
     expect(r.run.feature_tip_sha).toBe("tip_ok_1");
+    expect(r.run.qa).toBeUndefined(); // invalidateRunQa deletes qa
     expect(r.mutex_released).toBe(true);
     expect(mutex.isHeld(run().id)).toBe(false);
     expect(r.scope_locks_released).toBe(true);
     expect(locks.isHolder("tsk_a")).toBe(false);
     expect(forge.calls[0]?.task_id).toBe("tsk_a");
+  });
+
+  it("success without feature_tip_sha still invalidates QA", async () => {
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate([{ status: "ok" }]);
+    const r = await integrateOne({
+      run: run({
+        feature_tip_sha: "tip_before",
+        qa: { passed_at_commit: "tip_before" },
+      }),
+      task: task({ id: "tsk_a", status: "integrating" }),
+      forge,
+      mutex,
+    });
+    expect(r.task.status).toBe("done");
+    expect(r.run.feature_tip_sha).toBe("tip_before"); // tip unchanged when omitted
+    expect(r.run.qa).toBeUndefined(); // must re-QA
   });
 
   it("conflict → blocked/integrate_conflict; mutex released; locks kept", async () => {

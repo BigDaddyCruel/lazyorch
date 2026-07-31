@@ -18,6 +18,7 @@ import type {
   ForgeIntegrateResult,
   IntegrationMutexPort,
 } from "./ports.js";
+import { invalidateRunQa } from "./qa.js";
 
 export interface IntegrateOneParams {
   run: Run;
@@ -121,14 +122,16 @@ export async function integrateOne(
   }
 
   let nextRun = run;
-  if (featureTip !== undefined) {
-    // Tip moved → invalidate run-level QA (must re-run at new tip)
-    nextRun = {
-      ...run,
-      feature_tip_sha: featureTip,
-      updated_at: new Date().toISOString(),
-      qa: {},
-    };
+  // Successful integrate always invalidates run-level QA (even if tip sha omitted).
+  // Any integration after last QA must re-run QA at the new tip (design exit predicate).
+  if (integrate.status === "ok") {
+    nextRun = invalidateRunQa(run);
+    if (featureTip !== undefined) {
+      nextRun = {
+        ...nextRun,
+        feature_tip_sha: featureTip,
+      };
+    }
   }
 
   return {

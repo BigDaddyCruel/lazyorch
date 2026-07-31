@@ -12,6 +12,7 @@ import type { Task } from "../types/task.js";
 import {
   FakeForgeIntegrate,
   FakeIntegrationMutex,
+  FakeQaSession,
   FakeReviewerSession,
   FakeWorkerSession,
 } from "./fakes.js";
@@ -525,6 +526,175 @@ describe("implementingTick — assign/review/integrate loop", () => {
     expect(tick.gates).toHaveLength(1);
     expect(tick.gates[0]?.payload.reason).toBe("integrate_conflict_storm");
     expect(locks.isHolder("tsk_a")).toBe(true);
+  });
+
+  it("run-level QA pass then exit → PrePR (or CILoop with ready PR)", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const qa = new FakeQaSession({
+      defaultQueue: [{ passed: true, summary: "smoke ok" }],
+    });
+
+    const tick = await implementingTick({
+      run: run({ feature_tip_sha: "tip_qa" }),
+      tasks: [task({ id: "tsk_a", status: "done" })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      qa,
+      try_exit: true,
+      routing: { adapters: defaultAdaptersForRouting() },
+      now_ms: 1_000,
+      nextAgentId,
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(qa.requests).toHaveLength(1);
+    expect(qa.requests[0]?.feature_tip_sha).toBe("tip_qa");
+    expect(tick.qa_outcomes).toEqual([{ passed: true, summary: "smoke ok" }]);
+    expect(tick.run.qa?.passed_at_commit).toBe("tip_qa");
+    expect(tick.exited).toBe(true);
+    expect(tick.run.phase).toBe("PrePR");
+  });
+
+  it("run-level QA fail opens dynamic fix tasks and does not exit", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const qa = new FakeQaSession({
+      defaultQueue: [{ passed: false, summary: "broken" }],
+    });
+
+    const tick = await implementingTick({
+      run: run({ feature_tip_sha: "tip_qa" }),
+      tasks: [task({ id: "tsk_a", status: "done" })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      qa,
+      try_exit: true,
+      routing: { adapters: defaultAdaptersForRouting() },
+      now_ms: 1_000,
+      nextTaskId: () => "tsk_fixfixfixfixfixfixfixfix",
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(tick.exited).toBe(false);
+    expect(tick.run.phase).toBe("Implementing");
+    expect(tick.qa_fix_task_ids).toHaveLength(1);
+    expect(tick.tasks.some((t) => t.origin === "dynamic")).toBe(true);
+  });
+
+  it("exit short-circuits to CILoop when ready PR exists after QA", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const qa = new FakeQaSession({ defaultQueue: [{ passed: true }] });
+
+    const tick = await implementingTick({
+      run: run({
+        feature_tip_sha: "tip_qa",
+        pr_ref: { number: 4, state: "ready" },
+      }),
+      tasks: [task({ id: "tsk_a", status: "done" })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      qa,
+      try_exit: true,
+      routing: { adapters: defaultAdaptersForRouting() },
+      now_ms: 1_000,
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(tick.exited).toBe(true);
+    expect(tick.run.phase).toBe("CILoop");
+  });
+
+  it("solo max_qa=0 still exits via system QA path", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const qa = new FakeQaSession({ defaultQueue: [{ passed: true }] });
+    const config = {
+      ...defaultSchedulerConfig(),
+      team: {
+        ...defaultSchedulerConfig().team,
+        mode: "solo" as const,
+        max_qa: 0,
+        min_qa: 0,
+        max_reviewers: 0,
+        min_reviewers: 0,
+      },
+    };
+
+    const tick = await implementingTick({
+      run: run({ feature_tip_sha: "tip_solo" }),
+      tasks: [task({ id: "tsk_a", status: "done" })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      qa,
+      config,
+      try_exit: true,
+      routing: { adapters: defaultAdaptersForRouting() },
+      now_ms: 1_000,
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(qa.requests).toHaveLength(1);
+    expect(tick.qa_outcomes[0]?.passed).toBe(true);
+    expect(tick.exited).toBe(true);
+    expect(tick.run.phase).toBe("PrePR");
+    // system path does not hold a qa session slot
+    expect(tick.runtime.sessions.filter((s) => s.role === "qa")).toHaveLength(0);
+  });
+
+  it("solo max_qa=0 without QA port auto-stamps and exits", async () => {
+    const locks = new FakeScopeLockManager();
+    const mutex = new FakeIntegrationMutex();
+    const forge = new FakeForgeIntegrate();
+    const config = {
+      ...defaultSchedulerConfig(),
+      team: {
+        ...defaultSchedulerConfig().team,
+        mode: "solo" as const,
+        max_qa: 0,
+        min_qa: 0,
+      },
+    };
+
+    const tick = await implementingTick({
+      run: run({ feature_tip_sha: "tip_solo2" }),
+      tasks: [task({ id: "tsk_a", status: "done" })],
+      runtime: emptySchedulerRuntime(),
+      locks,
+      mutex,
+      forge,
+      config,
+      try_exit: true,
+      now_ms: 1_000,
+      run_workers: false,
+      run_reviews: false,
+      run_integrates: false,
+    });
+
+    expect(tick.qa_outcomes[0]?.passed).toBe(true);
+    expect(tick.run.qa?.passed_at_commit).toBe("tip_solo2");
+    expect(tick.exited).toBe(true);
   });
 });
 

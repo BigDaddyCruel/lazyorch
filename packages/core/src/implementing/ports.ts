@@ -90,6 +90,47 @@ export interface ReviewerSessionPort {
 }
 
 // ---------------------------------------------------------------------------
+// Run-level QA session (ephemeral; exit predicate re-QA at tip)
+// ---------------------------------------------------------------------------
+
+export interface QaSessionRequest {
+  run_id: string;
+  /** Feature tip SHA under test. */
+  feature_tip_sha: string;
+  feature_branch?: string;
+  agent_id: string;
+  adapter_id: string;
+  model: string;
+  model_tier: ModelTier | null;
+  session_kind: SessionKind;
+  effort?: EffortLevel;
+  cwd: string;
+  run_handle?: string;
+  /** Optional acceptance hints from plan tasks. */
+  acceptance_hints?: string[];
+}
+
+export interface QaSessionOutcome {
+  /** true → record qa.passed_at_commit = tip */
+  passed: boolean;
+  summary?: string;
+  error_message?: string;
+  /** Optional dynamic fix task titles when failed. */
+  fix_titles?: string[];
+  model_used?: string;
+  adapter_id?: string;
+  route?: RouteResult;
+}
+
+/**
+ * Injectable run-level QA port. Ephemeral session; clean exit free slot.
+ * Real binding uses qa-runner skill + session runner.
+ */
+export interface QaSessionPort {
+  run(req: QaSessionRequest): Promise<QaSessionOutcome>;
+}
+
+// ---------------------------------------------------------------------------
 // Forge integrate (daemon git job — no agent slot; KD-33)
 // ---------------------------------------------------------------------------
 
