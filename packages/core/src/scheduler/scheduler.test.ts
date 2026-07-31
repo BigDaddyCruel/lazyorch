@@ -270,6 +270,68 @@ describe("schedulerTick", () => {
     ).toBe("draining");
   });
 
+  it("drain backfill skips dirty idle workers (Issue 12)", () => {
+    const locks = new FakeScopeLockManager();
+    const cfg = defaultSchedulerConfig();
+    cfg.elasticity.cooldown_seconds = 0;
+    cfg.elasticity.scale_down_idle_minutes = 0;
+    // Pool 3: clean A, dirty B, clean C. ready=1 → desired=1, need_drain=2.
+    // Assign reuses A; pre-drain may list A; filter drops A, must backfill C only (not dirty B).
+    const runtime = emptySchedulerRuntime();
+    runtime.sessions = [
+      {
+        run_handle: "idle_a",
+        agent_id: "agt_a",
+        role: "worker",
+        state: "idle",
+        worktree_clean: true,
+        last_activity_ms: 0,
+      },
+      {
+        run_handle: "idle_dirty",
+        agent_id: "agt_d",
+        role: "worker",
+        state: "idle",
+        worktree_clean: false,
+        last_activity_ms: 1,
+      },
+      {
+        run_handle: "idle_c",
+        agent_id: "agt_c",
+        role: "worker",
+        state: "idle",
+        worktree_clean: true,
+        last_activity_ms: 2,
+      },
+    ];
+    runtime.last_scale_ms = 0;
+
+    const result = schedulerTick({
+      tasks: [task("work")],
+      phase: "Implementing",
+      runtime,
+      config: cfg,
+      locks,
+      now_ms: 1000,
+      routing: { routeFn: () => route },
+    });
+
+    expect(result.assign.assigned[0]?.session_plan.run_handle).toBe("idle_a");
+    const a = result.runtime.sessions.find((s) => s.run_handle === "idle_a");
+    expect(a?.state).toBe("starting");
+
+    // Dirty never drained; only remaining clean idle_c
+    expect(result.scale.drain_handles).not.toContain("idle_dirty");
+    expect(result.scale.drain_handles).not.toContain("idle_a");
+    expect(result.scale.drain_handles).toContain("idle_c");
+    const dirty = result.runtime.sessions.find(
+      (s) => s.run_handle === "idle_dirty",
+    );
+    expect(dirty?.state).toBe("idle");
+    const c = result.runtime.sessions.find((s) => s.run_handle === "idle_c");
+    expect(c?.state).toBe("draining");
+  });
+
   it("does not drain idle worker reused for assign in the same tick (Issue 11)", () => {
     const locks = new FakeScopeLockManager();
     const cfg = defaultSchedulerConfig();

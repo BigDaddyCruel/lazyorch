@@ -151,8 +151,9 @@ export function planElasticity(input: {
 }
 
 /**
- * True if a session is still a valid scale-down target after assign
- * (idle, no task, not draining). Cleanliness was already required pre-assign.
+ * True if a session is still a valid scale-down target after assign.
+ * Matches `idleDrainCandidates` / design: idle, no task, worktree clean.
+ * Dirty idle workers are never auto-drained (needs_reap_review path).
  */
 export function isStillDrainable(
   session: SchedulerSession | undefined,
@@ -161,15 +162,17 @@ export function isStillDrainable(
   return (
     session.role === "worker" &&
     session.state === "idle" &&
-    session.task_id === undefined
+    session.task_id === undefined &&
+    session.worktree_clean === true
   );
 }
 
 /**
  * Filter pre-assign drain handles after idle reuse (Issue 11).
- * Only keep handles that are still idle with no task; never drain a
+ * Only keep handles that are still idle + clean + no task; never drain a
  * run_handle that assign just claimed. If some pre-selected handles were
- * reused, backfill from remaining drainable sessions up to needDrain.
+ * reused, backfill from remaining clean idle sessions up to needDrain
+ * (Issue 12: never backfill dirty idle).
  */
 export function filterDrainHandlesAfterAssign(input: {
   pre_drain_handles: readonly string[];
