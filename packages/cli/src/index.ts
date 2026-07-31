@@ -58,12 +58,16 @@ doctor options:
 
 adapter usage:
   lazyorch adapter list [--repo <path>] [--enabled] [--probe]
-  lazyorch adapter register --id <id> --binary <path> [--name <display>] [--start-template <t>] [--capabilities <json>] [--repo <path>]
+  lazyorch adapter register --id <id> --binary <path> [--name <display>]
+    [--start-template <t>] [--models-args <csv|json>] [--capabilities <json>]
+    [--from-template aider|opencode] [--repo <path>]
   lazyorch adapter test [id] [--repo <path>]
 
   list is resolve-only by default (no version spawn). Pass --probe for live
   version checks, or use adapter test. Unbound adapters warn (exit 0);
   hard probe errors fail (exit 1). start_template recommended for custom ids.
+  --from-template seeds binary/start_template/models_args from USER_ADAPTER_TEMPLATES.
+  --models-args e.g. models or ["models"] enables listModels probes.
 
 context usage:
   lazyorch context list --run <id> [--repo <path>]
@@ -89,6 +93,8 @@ async function main(argv: string[]): Promise<number> {
         id: { type: "string" },
         binary: { type: "string" },
         "start-template": { type: "string" },
+        "models-args": { type: "string" },
+        "from-template": { type: "string" },
         capabilities: { type: "string" },
         enabled: { type: "boolean", default: false },
         probe: { type: "boolean", default: false },
@@ -164,6 +170,12 @@ async function main(argv: string[]): Promise<number> {
       if (typeof values.name === "string") adapterOpts.displayName = values.name;
       if (typeof values["start-template"] === "string") {
         adapterOpts.startTemplate = values["start-template"];
+      }
+      if (typeof values["models-args"] === "string") {
+        adapterOpts.modelsArgs = values["models-args"];
+      }
+      if (typeof values["from-template"] === "string") {
+        adapterOpts.fromTemplate = values["from-template"];
       }
       if (typeof values.capabilities === "string") {
         adapterOpts.capabilitiesJson = values.capabilities;

@@ -103,7 +103,7 @@ export const BUILTIN_CATALOG: readonly BuiltinCatalogEntry[] = [
     capabilities: codingCapabilities({
       tier_map: { ...DEFAULT_TIER_MAPS.claude },
       effort_flag: true,
-      usage_reporting: "tokens",
+      usage_reporting: "tokens_and_cost",
     }),
     // Single source: CODING_PROFILES (programmatic argv + custom-template detect).
     start_template: CODING_PROFILES.claude.default_start_template,

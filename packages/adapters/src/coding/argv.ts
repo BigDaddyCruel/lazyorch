@@ -114,6 +114,9 @@ export function buildCodingArgv(options: BuildCodingArgvOptions): string[] {
       timeout_ms: session.timeout_ms,
       binary,
       agent_id: session.agent_id,
+      // Coding custom templates typically use {prompt_file}; leave {prompt} empty
+      // unless callers populate it (generic adapter reads the file at start).
+      prompt: "",
     };
     if (registration.args_prefix) vars.args_prefix = registration.args_prefix;
     if (session.task_id !== undefined) vars.task_id = session.task_id;

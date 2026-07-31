@@ -564,4 +564,27 @@ describe("AdapterRegistry.createAdapter coding path", () => {
     const gen = registry.createGeneric("aider");
     expect(gen?.id).toBe("aider");
   });
+
+  it("listModels on default claude returns [] without models_args (not tier_map)", async () => {
+    const a = createClaudeAdapter(
+      claudeRegistration({
+        capabilities: {
+          models: [],
+          tier_map: {
+            small: "claude-haiku-4-5",
+            medium: "claude-sonnet-4-6",
+            large: "claude-sonnet-4-6",
+            xlarge: "claude-opus-4-6",
+          },
+          streaming: false,
+          worktree_ok: true,
+          usage_reporting: "tokens_and_cost",
+          effort_flag: true,
+        },
+      }),
+      { mode: "fake" },
+    );
+    // Empty capabilities.models + no models_args → unspecified, not allowlist.
+    await expect(a.listModels()).resolves.toEqual([]);
+  });
 });

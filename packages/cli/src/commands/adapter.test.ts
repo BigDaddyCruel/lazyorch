@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runInit } from "./init.js";
-import { runAdapter } from "./adapter.js";
+import { parseModelsArgsFlag, runAdapter } from "./adapter.js";
 
 const temps: string[] = [];
 
@@ -152,5 +152,29 @@ describe("runAdapter CLI", () => {
     // Unbound is soft (aligned with doctor); only hard probe errors fail.
     expect(result.exitCode).toBe(0);
     expect(result.message).toMatch(/unbound/i);
+  });
+
+  it("register --from-template opencode seeds models_args and {prompt}", async () => {
+    const root = await tempRoot();
+    await runInit({ repo: root, name: "demo", stdout: silent() });
+    const result = await runAdapter({
+      action: "register",
+      repo: root,
+      fromTemplate: "opencode",
+      stdout: silent(),
+      stderr: silent(),
+    });
+    expect(result.exitCode).toBe(0);
+    const yaml = await readFile(join(root, ".lazyorch", "config.yml"), "utf8");
+    expect(yaml).toMatch(/id:\s*opencode/);
+    expect(yaml).toMatch(/models_args/);
+    expect(yaml).toMatch(/\{prompt\}/);
+    expect(yaml).not.toMatch(/--file \{prompt_file\}/);
+  });
+
+  it("parseModelsArgsFlag accepts CSV and JSON", () => {
+    expect(parseModelsArgsFlag("models")).toEqual(["models"]);
+    expect(parseModelsArgsFlag("models,list")).toEqual(["models", "list"]);
+    expect(parseModelsArgsFlag('["models"]')).toEqual(["models"]);
   });
 });
