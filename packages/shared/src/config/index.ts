@@ -1,29 +1,12 @@
-/**
- * @lazyorch/shared — logging, ids, config schemas (zod).
- */
-export const PACKAGE_NAME = "@lazyorch/shared" as const;
-
-export function sharedPlaceholder(): string {
-  return PACKAGE_NAME;
-}
-
-export {
-  SCHEMA_VERSION,
-  type SchemaVersion,
-} from "./schema-version.js";
-
-export {
-  generateId,
-  ID_PREFIXES,
-  isPrefixedId,
-  parseIdPrefix,
-  type IdPrefix,
-} from "./ids.js";
-
 export {
   validateSlotPacking,
   minSlotDemand,
   peakSlotDemand,
+  type SlotPackingInput,
+  type SlotPackingResult,
+} from "./packing.js";
+
+export {
   MODEL_TIERS,
   ModelTierSchema,
   AdapterSourceSchema,
@@ -49,16 +32,6 @@ export {
   ReviewerConfigSchema,
   QaConfigSchema,
   LazyorchConfigSchema,
-  ConfigValidationError,
-  parseConfig,
-  parseConfigYaml,
-  defaultConfig,
-  stringifyConfigYaml,
-  slotPackingForConfig,
-  DEFAULT_CONFIG_OVERRIDES,
-  createDefaultConfig,
-  type SlotPackingInput,
-  type SlotPackingResult,
   type ModelTier,
   type AdapterSource,
   type AdapterRegistryEntry,
@@ -71,6 +44,20 @@ export {
   type GatesConfig,
   type LazyorchConfig,
   type LazyorchConfigInput,
+} from "./schema.js";
+
+export {
+  ConfigValidationError,
+  parseConfig,
+  parseConfigYaml,
+  defaultConfig,
+  stringifyConfigYaml,
+  slotPackingForConfig,
   type ParseConfigResult,
   type ParseConfigOptions,
-} from "./config/index.js";
+} from "./load.js";
+
+export {
+  DEFAULT_CONFIG_OVERRIDES,
+  createDefaultConfig,
+} from "./defaults.js";
