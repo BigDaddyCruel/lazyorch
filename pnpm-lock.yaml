@@ -70,15 +70,6 @@ importers:
 
   packages/daemon:
     dependencies:
-      '@lazyorch/adapters':
-        specifier: workspace:*
-        version: link:../adapters
-      '@lazyorch/core':
-        specifier: workspace:*
-        version: link:../core
-      '@lazyorch/forge':
-        specifier: workspace:*
-        version: link:../forge
       '@lazyorch/shared':
         specifier: workspace:*
         version: link:../shared
