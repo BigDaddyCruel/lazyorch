@@ -151,8 +151,84 @@ export function planElasticity(input: {
 }
 
 /**
+ * True if a session is still a valid scale-down target after assign
+ * (idle, no task, not draining). Cleanliness was already required pre-assign.
+ */
+export function isStillDrainable(
+  session: SchedulerSession | undefined,
+): boolean {
+  if (!session) return false;
+  return (
+    session.role === "worker" &&
+    session.state === "idle" &&
+    session.task_id === undefined
+  );
+}
+
+/**
+ * Filter pre-assign drain handles after idle reuse (Issue 11).
+ * Only keep handles that are still idle with no task; never drain a
+ * run_handle that assign just claimed. If some pre-selected handles were
+ * reused, backfill from remaining drainable sessions up to needDrain.
+ */
+export function filterDrainHandlesAfterAssign(input: {
+  pre_drain_handles: readonly string[];
+  sessions_after_assign: readonly SchedulerSession[];
+  /** How many workers to remove: max(0, pool - desired). */
+  need_drain: number;
+  /** run_handles claimed by assign this tick (must never drain). */
+  assigned_handles?: ReadonlySet<string>;
+}): string[] {
+  const byHandle = new Map(
+    input.sessions_after_assign.map((s) => [s.run_handle, s]),
+  );
+  const assigned = input.assigned_handles ?? new Set<string>();
+  const need = Math.max(0, input.need_drain);
+  if (need === 0) return [];
+
+  const stillOk = (h: string): boolean => {
+    if (assigned.has(h)) return false;
+    return isStillDrainable(byHandle.get(h));
+  };
+
+  const out: string[] = [];
+  for (const h of input.pre_drain_handles) {
+    if (out.length >= need) break;
+    if (stillOk(h) && !out.includes(h)) out.push(h);
+  }
+
+  if (out.length < need) {
+    // Backfill remaining idle workers (stable by last_activity then handle)
+    const candidates = input.sessions_after_assign
+      .filter(
+        (s) =>
+          isStillDrainable(s) &&
+          !assigned.has(s.run_handle) &&
+          !out.includes(s.run_handle),
+      )
+      .sort((a, b) => {
+        if (a.last_activity_ms !== b.last_activity_ms) {
+          return a.last_activity_ms - b.last_activity_ms;
+        }
+        return a.run_handle < b.run_handle
+          ? -1
+          : a.run_handle > b.run_handle
+            ? 1
+            : 0;
+      });
+    for (const s of candidates) {
+      if (out.length >= need) break;
+      out.push(s.run_handle);
+    }
+  }
+
+  return out;
+}
+
+/**
  * After assign, recompute idle pre-warm spawn so it does not double-claim
  * free slots already consumed by assignment (Issue 4).
+ * Drain handles are filtered so idle-reuse assign never collides (Issue 11).
  *
  * Assign is the primary path for workers with tasks. `spawn_count` only
  * fills remaining desired gap (e.g. min_workers) with task-less idle workers.
@@ -171,13 +247,52 @@ export function clampSpawnAfterAssign(input: {
   pause_elasticity?: boolean;
   /** Pre-assign scale decision (for drain handles / cooldown reason). */
   pre_scale: ScaleDecision;
+  /** run_handles claimed by assign this tick (idle reuse or mint). */
+  assigned_handles?: ReadonlySet<string>;
 }): ScaleDecision {
   const usage = computeSlotUsage(input.sessions_after_assign);
   const pool = usage.pool_workers;
 
-  // Preserve drain decision from pre-assign plan (idle clean workers).
+  // Scale-down: re-filter drain targets after assign (Issue 11).
   if (input.pre_scale.action === "drain") {
-    return input.pre_scale;
+    if (input.pause_elasticity) {
+      return {
+        desired: input.desired,
+        active_workers: pool,
+        action: "none",
+        spawn_count: 0,
+        drain_handles: [],
+        reason: "elasticity_paused",
+      };
+    }
+    const needDrain = Math.max(0, pool - input.desired);
+    const filterInput: Parameters<typeof filterDrainHandlesAfterAssign>[0] = {
+      pre_drain_handles: input.pre_scale.drain_handles,
+      sessions_after_assign: input.sessions_after_assign,
+      need_drain: needDrain,
+    };
+    if (input.assigned_handles) {
+      filterInput.assigned_handles = input.assigned_handles;
+    }
+    const drain_handles = filterDrainHandlesAfterAssign(filterInput);
+    if (drain_handles.length === 0) {
+      return {
+        desired: input.desired,
+        active_workers: pool,
+        action: "none",
+        spawn_count: 0,
+        drain_handles: [],
+        reason: needDrain === 0 ? "at_desired" : "no_idle_clean_workers",
+      };
+    }
+    return {
+      desired: input.desired,
+      active_workers: pool,
+      action: "drain",
+      spawn_count: 0,
+      drain_handles,
+      reason: "scale_down",
+    };
   }
 
   if (input.pause_elasticity) {
@@ -278,6 +393,9 @@ function applyDrain(
   const set = new Set(drain_handles);
   return sessions.map((s) => {
     if (!set.has(s.run_handle)) return s;
+    // Defensive: never drain a session that is no longer idle/unassigned
+    // (e.g. same-tick idle reuse that slipped past filter).
+    if (!isStillDrainable(s)) return s;
     return { ...s, state: "draining" as const, last_activity_ms: now_ms };
   });
 }
@@ -419,6 +537,9 @@ function runTickCore(
     lead_reservation_needed: phaseNeedsLeadReservation(input.phase),
   });
 
+  const assignedHandles = new Set(
+    assign.assigned.map((a) => a.session_plan.run_handle),
+  );
   const clampInput: Parameters<typeof clampSpawnAfterAssign>[0] = {
     desired,
     sessions_after_assign: sessionsAfterAssign,
@@ -427,6 +548,7 @@ function runTickCore(
     now_ms: now,
     last_scale_ms: input.runtime.last_scale_ms,
     pre_scale: preScale,
+    assigned_handles: assignedHandles,
   };
   if (input.pause_elasticity !== undefined) {
     clampInput.pause_elasticity = input.pause_elasticity;

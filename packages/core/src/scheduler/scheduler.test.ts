@@ -270,6 +270,63 @@ describe("schedulerTick", () => {
     ).toBe("draining");
   });
 
+  it("does not drain idle worker reused for assign in the same tick (Issue 11)", () => {
+    const locks = new FakeScopeLockManager();
+    const cfg = defaultSchedulerConfig();
+    cfg.elasticity.cooldown_seconds = 0;
+    cfg.elasticity.scale_down_idle_minutes = 0;
+    // 2 idle clean workers, 1 ready → desired=1; pre-scale wants drain of 1
+    // pickIdleWorker and drain both prefer oldest (idle_a) — must not collide
+    const runtime = emptySchedulerRuntime();
+    runtime.sessions = [
+      {
+        run_handle: "idle_a",
+        agent_id: "agt_a",
+        role: "worker",
+        state: "idle",
+        worktree_clean: true,
+        last_activity_ms: 0,
+      },
+      {
+        run_handle: "idle_b",
+        agent_id: "agt_b",
+        role: "worker",
+        state: "idle",
+        worktree_clean: true,
+        last_activity_ms: 1,
+      },
+    ];
+    runtime.last_scale_ms = 0;
+
+    const result = schedulerTick({
+      tasks: [task("work")],
+      phase: "Implementing",
+      runtime,
+      config: cfg,
+      locks,
+      now_ms: 1000,
+      routing: { routeFn: () => route },
+    });
+
+    expect(result.desired_workers).toBe(1);
+    expect(result.assign.assigned).toHaveLength(1);
+    expect(result.assign.assigned[0]?.session_plan.reused_idle).toBe(true);
+    const reused = result.assign.assigned[0]!.session_plan.run_handle;
+    expect(reused).toBe("idle_a");
+
+    // Reused worker stays starting with task — never draining
+    const a = result.runtime.sessions.find((s) => s.run_handle === "idle_a");
+    expect(a?.state).toBe("starting");
+    expect(a?.task_id).toBe("work");
+
+    // The other idle is drained (pool 2 → desired 1)
+    expect(result.scale.action).toBe("drain");
+    expect(result.scale.drain_handles).toEqual(["idle_b"]);
+    expect(result.scale.drain_handles).not.toContain(reused);
+    const b = result.runtime.sessions.find((s) => s.run_handle === "idle_b");
+    expect(b?.state).toBe("draining");
+  });
+
   it("records scale_events on drain", () => {
     const locks = new FakeScopeLockManager();
     const metrics = new SchedulerMetrics();

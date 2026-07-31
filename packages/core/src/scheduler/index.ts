@@ -45,6 +45,8 @@ export { SchedulerMetrics } from "./metrics.js";
 export {
   planElasticity,
   clampSpawnAfterAssign,
+  filterDrainHandlesAfterAssign,
+  isStillDrainable,
   applyAssignToSessions,
   schedulerTick,
   schedulerTickAsync,

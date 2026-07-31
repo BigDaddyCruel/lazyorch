@@ -257,6 +257,8 @@ export {
   SchedulerMetrics,
   planElasticity,
   clampSpawnAfterAssign,
+  filterDrainHandlesAfterAssign,
+  isStillDrainable,
   applyAssignToSessions,
   schedulerTick,
   schedulerTickAsync,
