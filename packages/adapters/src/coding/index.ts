@@ -7,6 +7,7 @@ export {
   CodingAdapterError,
   createCodingAdapter,
   createCodingAdapterForId,
+  extractRunHandle,
   type CodingAdapterOptions,
 } from "./adapter.js";
 

@@ -1,29 +1,46 @@
 /**
- * Load and materialize adapter record/replay fixtures (fake mode).
+ * Load and materialize adapter fake-mode fixtures (golden argv + canned results).
+ *
+ * These are **hand-authored** samples for CI without live LLMs — not live
+ * `LAZYORCH_ADAPTER_MODE=record` captures. Argv shapes match first-class
+ * profiles under default test registration binaries (`/bin/<id>`), not PATH
+ * discovery on a real Windows install.
  *
  * Placeholders in fixture strings:
  *   {session_dir}  absolute session directory
  *   {cwd}          session working directory (usually same as session_dir)
  *   {prompt_file}  path to prompt.md
- *   {run_handle}   basename of session_dir (adapter run handle)
+ *   {run_handle}   last path segment of session_dir (see extractRunHandle)
  */
 
 import { readFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  FirstClassCodingId,
-  RecordedStart,
-  SessionResult,
+import {
+  FIRST_CLASS_CODING_IDS,
+  extractRunHandle,
+  type FirstClassCodingId,
+  type RecordedStart,
+  type SessionResult,
 } from "@lazyorch/adapters";
-import { FIRST_CLASS_CODING_IDS } from "@lazyorch/adapters";
+import { MODEL_TIERS, type ModelTier } from "@lazyorch/shared";
 
 export const FIXTURES_ROOT = dirname(fileURLToPath(import.meta.url));
 export const ADAPTER_FIXTURES_DIR = join(FIXTURES_ROOT, "adapters");
 
+const SESSION_STATUSES = [
+  "ok",
+  "error",
+  "cancelled",
+  "timeout",
+  "stall",
+] as const;
+
+const SESSION_KINDS = ["llm", "deterministic"] as const;
+
 export interface AdapterFakeFixtureSession {
   model: string;
-  model_tier: string | null;
+  model_tier: ModelTier | null;
   role: string;
   session_kind: "llm" | "deterministic";
 }
@@ -45,9 +62,268 @@ export interface FixturePathContext {
   run_handle?: string;
 }
 
-function extractRunHandle(sessionDir: string): string {
-  const parts = sessionDir.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? basename(sessionDir);
+export class FixtureLoadError extends Error {
+  readonly path: string;
+
+  constructor(path: string, message: string) {
+    super(`fixture ${path}: ${message}`);
+    this.name = "FixtureLoadError";
+    this.path = path;
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+function isModelTier(value: unknown): value is ModelTier {
+  return (
+    typeof value === "string" &&
+    (MODEL_TIERS as readonly string[]).includes(value)
+  );
+}
+
+function parseSession(
+  raw: unknown,
+  path: string,
+): AdapterFakeFixtureSession {
+  if (!isObject(raw)) {
+    throw new FixtureLoadError(path, "session must be an object");
+  }
+  if (!isNonEmptyString(raw.model)) {
+    throw new FixtureLoadError(path, "session.model must be a non-empty string");
+  }
+  if (raw.model_tier !== null && !isModelTier(raw.model_tier)) {
+    throw new FixtureLoadError(
+      path,
+      `session.model_tier must be null or one of ${MODEL_TIERS.join(", ")}`,
+    );
+  }
+  if (!isNonEmptyString(raw.role)) {
+    throw new FixtureLoadError(path, "session.role must be a non-empty string");
+  }
+  if (
+    typeof raw.session_kind !== "string" ||
+    !(SESSION_KINDS as readonly string[]).includes(raw.session_kind)
+  ) {
+    throw new FixtureLoadError(
+      path,
+      `session.session_kind must be one of ${SESSION_KINDS.join(", ")}`,
+    );
+  }
+  return {
+    model: raw.model,
+    model_tier: raw.model_tier as ModelTier | null,
+    role: raw.role,
+    session_kind: raw.session_kind as "llm" | "deterministic",
+  };
+}
+
+function parseRecordedStart(raw: unknown, path: string): RecordedStart {
+  if (!isObject(raw)) {
+    throw new FixtureLoadError(path, "recorded_start must be an object");
+  }
+  if (!isNonEmptyString(raw.adapter_id)) {
+    throw new FixtureLoadError(path, "recorded_start.adapter_id required");
+  }
+  if (!isNonEmptyString(raw.run_handle)) {
+    throw new FixtureLoadError(path, "recorded_start.run_handle required");
+  }
+  if (!isStringArray(raw.argv) || raw.argv.length === 0) {
+    throw new FixtureLoadError(
+      path,
+      "recorded_start.argv must be a non-empty string[]",
+    );
+  }
+  if (!isNonEmptyString(raw.cwd)) {
+    throw new FixtureLoadError(path, "recorded_start.cwd required");
+  }
+  if (typeof raw.model !== "string") {
+    throw new FixtureLoadError(path, "recorded_start.model must be a string");
+  }
+  if (!isNonEmptyString(raw.session_dir)) {
+    throw new FixtureLoadError(path, "recorded_start.session_dir required");
+  }
+  if (!isNonEmptyString(raw.started_at)) {
+    throw new FixtureLoadError(path, "recorded_start.started_at required");
+  }
+  if (raw.mode !== "fake" && raw.mode !== "record" && raw.mode !== "live") {
+    throw new FixtureLoadError(
+      path,
+      `recorded_start.mode must be live|fake|record, got ${String(raw.mode)}`,
+    );
+  }
+  const out: RecordedStart = {
+    adapter_id: raw.adapter_id,
+    run_handle: raw.run_handle,
+    argv: raw.argv,
+    cwd: raw.cwd,
+    model: raw.model,
+    session_dir: raw.session_dir,
+    started_at: raw.started_at,
+    mode: raw.mode,
+  };
+  if (raw.prompt_file !== undefined) {
+    if (!isNonEmptyString(raw.prompt_file)) {
+      throw new FixtureLoadError(
+        path,
+        "recorded_start.prompt_file must be a non-empty string when set",
+      );
+    }
+    out.prompt_file = raw.prompt_file;
+  }
+  return out;
+}
+
+function parseSessionResult(raw: unknown, path: string): SessionResult {
+  if (!isObject(raw)) {
+    throw new FixtureLoadError(path, "session_result must be an object");
+  }
+  if (
+    typeof raw.status !== "string" ||
+    !(SESSION_STATUSES as readonly string[]).includes(raw.status)
+  ) {
+    throw new FixtureLoadError(
+      path,
+      `session_result.status must be one of ${SESSION_STATUSES.join(", ")}`,
+    );
+  }
+  const result: SessionResult = {
+    status: raw.status as SessionResult["status"],
+  };
+  if (raw.exit_code !== undefined) {
+    if (typeof raw.exit_code !== "number") {
+      throw new FixtureLoadError(path, "session_result.exit_code must be a number");
+    }
+    result.exit_code = raw.exit_code;
+  }
+  if (raw.adapter_id !== undefined) {
+    if (!isNonEmptyString(raw.adapter_id)) {
+      throw new FixtureLoadError(path, "session_result.adapter_id must be a string");
+    }
+    result.adapter_id = raw.adapter_id;
+  }
+  if (raw.model_used !== undefined) {
+    if (typeof raw.model_used !== "string") {
+      throw new FixtureLoadError(path, "session_result.model_used must be a string");
+    }
+    result.model_used = raw.model_used;
+  }
+  if (raw.summary !== undefined) {
+    if (typeof raw.summary !== "string") {
+      throw new FixtureLoadError(path, "session_result.summary must be a string");
+    }
+    result.summary = raw.summary;
+  }
+  if (raw.usage !== undefined) {
+    if (!isObject(raw.usage)) {
+      throw new FixtureLoadError(path, "session_result.usage must be an object");
+    }
+    const usage: NonNullable<SessionResult["usage"]> = {};
+    if (raw.usage.input_tokens !== undefined) {
+      if (typeof raw.usage.input_tokens !== "number") {
+        throw new FixtureLoadError(path, "usage.input_tokens must be a number");
+      }
+      usage.input_tokens = raw.usage.input_tokens;
+    }
+    if (raw.usage.output_tokens !== undefined) {
+      if (typeof raw.usage.output_tokens !== "number") {
+        throw new FixtureLoadError(path, "usage.output_tokens must be a number");
+      }
+      usage.output_tokens = raw.usage.output_tokens;
+    }
+    if (raw.usage.estimated_usd !== undefined) {
+      if (typeof raw.usage.estimated_usd !== "number") {
+        throw new FixtureLoadError(path, "usage.estimated_usd must be a number");
+      }
+      usage.estimated_usd = raw.usage.estimated_usd;
+    }
+    result.usage = usage;
+  }
+  return result;
+}
+
+/**
+ * Validate and coerce fixture JSON. When `expectedAdapterId` is set (load by
+ * filename id), require `adapter_id` to match.
+ */
+export function assertFixtureShape(
+  raw: unknown,
+  path: string,
+  expectedAdapterId?: FirstClassCodingId,
+): AdapterFakeFixture {
+  if (!isObject(raw)) {
+    throw new FixtureLoadError(path, "expected object");
+  }
+  if (raw.schema_version !== 1) {
+    throw new FixtureLoadError(
+      path,
+      `unsupported schema_version ${String(raw.schema_version)}`,
+    );
+  }
+  if (
+    typeof raw.adapter_id !== "string" ||
+    !(FIRST_CLASS_CODING_IDS as readonly string[]).includes(raw.adapter_id)
+  ) {
+    throw new FixtureLoadError(
+      path,
+      `unknown adapter_id ${String(raw.adapter_id)}`,
+    );
+  }
+  const adapter_id = raw.adapter_id as FirstClassCodingId;
+  if (expectedAdapterId !== undefined && adapter_id !== expectedAdapterId) {
+    throw new FixtureLoadError(
+      path,
+      `adapter_id "${adapter_id}" does not match expected "${expectedAdapterId}"`,
+    );
+  }
+  if (raw.mode !== "fake") {
+    throw new FixtureLoadError(
+      path,
+      `expected mode "fake", got ${String(raw.mode)}`,
+    );
+  }
+
+  const session = parseSession(raw.session, path);
+  const recorded_start = parseRecordedStart(raw.recorded_start, path);
+  const session_result = parseSessionResult(raw.session_result, path);
+
+  if (recorded_start.adapter_id !== adapter_id) {
+    throw new FixtureLoadError(
+      path,
+      `recorded_start.adapter_id "${recorded_start.adapter_id}" !== fixture adapter_id "${adapter_id}"`,
+    );
+  }
+  if (
+    session_result.adapter_id !== undefined &&
+    session_result.adapter_id !== adapter_id
+  ) {
+    throw new FixtureLoadError(
+      path,
+      `session_result.adapter_id "${session_result.adapter_id}" !== fixture adapter_id "${adapter_id}"`,
+    );
+  }
+
+  const fixture: AdapterFakeFixture = {
+    schema_version: 1,
+    adapter_id,
+    mode: "fake",
+    session,
+    recorded_start,
+    session_result,
+  };
+  if (typeof raw.description === "string") {
+    fixture.description = raw.description;
+  }
+  return fixture;
 }
 
 function substitutePlaceholders(
@@ -66,7 +342,7 @@ function materializeRecordedStart(
   ctx: Required<FixturePathContext>,
 ): RecordedStart {
   return {
-    adapter_id: substitutePlaceholders(raw.adapter_id, ctx),
+    adapter_id: raw.adapter_id,
     run_handle: substitutePlaceholders(raw.run_handle, ctx),
     argv: raw.argv.map((t) => substitutePlaceholders(t, ctx)),
     cwd: substitutePlaceholders(raw.cwd, ctx),
@@ -80,26 +356,6 @@ function materializeRecordedStart(
   };
 }
 
-function assertFixtureShape(raw: unknown, path: string): AdapterFakeFixture {
-  if (raw === null || typeof raw !== "object") {
-    throw new Error(`fixture ${path}: expected object`);
-  }
-  const f = raw as AdapterFakeFixture;
-  if (f.schema_version !== 1) {
-    throw new Error(`fixture ${path}: unsupported schema_version ${String(f.schema_version)}`);
-  }
-  if (!(FIRST_CLASS_CODING_IDS as readonly string[]).includes(f.adapter_id)) {
-    throw new Error(`fixture ${path}: unknown adapter_id ${f.adapter_id}`);
-  }
-  if (f.mode !== "fake") {
-    throw new Error(`fixture ${path}: expected mode "fake", got ${String(f.mode)}`);
-  }
-  if (!f.recorded_start || !f.session_result || !f.session) {
-    throw new Error(`fixture ${path}: missing recorded_start, session_result, or session`);
-  }
-  return f;
-}
-
 /** Absolute path to `tests/fixtures/adapters/<id>.fake.json`. */
 export function adapterFixturePath(adapterId: FirstClassCodingId): string {
   return join(ADAPTER_FIXTURES_DIR, `${adapterId}.fake.json`);
@@ -111,13 +367,19 @@ export async function loadAdapterFakeFixture(
 ): Promise<AdapterFakeFixture> {
   const path = adapterFixturePath(adapterId);
   const text = await readFile(path, "utf8");
-  const parsed: unknown = JSON.parse(text);
-  return assertFixtureShape(parsed, path);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new FixtureLoadError(path, `invalid JSON: ${msg}`);
+  }
+  return assertFixtureShape(parsed, path, adapterId);
 }
 
 /**
  * Load fixture and expand path placeholders for a concrete session dir.
- * Use when comparing argv / recorded starts from a live fake-mode start.
+ * Uses production {@link extractRunHandle} for `{run_handle}` when omitted.
  */
 export async function loadMaterializedAdapterFixture(
   adapterId: FirstClassCodingId,
@@ -140,3 +402,6 @@ export async function loadMaterializedAdapterFixture(
 export function expectedAdapterFixtureIds(): readonly FirstClassCodingId[] {
   return FIRST_CLASS_CODING_IDS;
 }
+
+/** Re-export production handle extraction for tests / fixtures. */
+export { extractRunHandle };

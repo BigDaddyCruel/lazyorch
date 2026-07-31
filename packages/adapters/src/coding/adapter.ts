@@ -437,7 +437,12 @@ export class CodingCliAdapter implements AgentAdapter {
   }
 }
 
-function extractRunHandle(sessionDir: string): string {
+/**
+ * Derive run_handle from session_dir (last path segment).
+ * Trailing separators yield empty last segment → `"unknown"` (not basename).
+ * Shared with fixture materialization so record/replay goldens match production.
+ */
+export function extractRunHandle(sessionDir: string): string {
   const parts = sessionDir.replace(/\\/g, "/").split("/");
   return parts[parts.length - 1] || "unknown";
 }

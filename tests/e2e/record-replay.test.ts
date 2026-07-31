@@ -1,6 +1,10 @@
 /**
- * E2E record/replay: first-class coding adapters in fake mode, driven by
- * tests/fixtures/adapters/<id>.fake.json (no live LLM binaries or API keys).
+ * Golden argv inventory + canned fake wait() for first-class coding adapters.
+ *
+ * Driven by hand-authored `tests/fixtures/adapters/<id>.fake.json` samples
+ * (default test registration binaries `/bin/<id>`). This is **not** a live
+ * `record` mode capture/replay pipeline — see adapter unit tests for deeper
+ * cancel/unbound coverage.
  */
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,7 +25,7 @@ import {
   type FirstClassCodingId,
   type SessionResult,
 } from "@lazyorch/adapters";
-import type { ModelTier } from "@lazyorch/shared";
+import { ModelTierSchema, type ModelTier } from "@lazyorch/shared";
 import {
   expectedAdapterFixtureIds,
   loadAdapterFakeFixture,
@@ -29,14 +33,6 @@ import {
 } from "../fixtures/load.js";
 
 const tempDirs: string[] = [];
-
-const MODEL_TIERS = new Set<string>([
-  "nano",
-  "small",
-  "medium",
-  "large",
-  "xlarge",
-]);
 
 afterEach(async () => {
   while (tempDirs.length > 0) {
@@ -79,10 +75,10 @@ function createFakeAdapter(
   }
 }
 
-function parseTier(value: string | null): ModelTier | null {
+function parseTier(value: ModelTier | null): ModelTier | null {
   if (value === null) return null;
-  if (MODEL_TIERS.has(value)) return value as ModelTier;
-  return "medium";
+  // Fixture loader already validated; re-parse to fail hard on drift.
+  return ModelTierSchema.parse(value);
 }
 
 function llmSession(
@@ -130,14 +126,14 @@ describe("fixtures inventory", () => {
       expect(f.session_result.status).toBe("ok");
       expect(f.session_result.adapter_id).toBe(id);
       expect(f.recorded_start.argv.length).toBeGreaterThan(0);
-      expect(f.recorded_start.argv[0]).toContain(id === "claude" ? "claude" : id);
+      expect(f.recorded_start.argv[0]).toContain(id);
     }
   });
 });
 
-describe("adapter fake record/replay from fixtures", () => {
+describe("adapter fake golden argv + canned result (fixtures)", () => {
   for (const id of expectedAdapterFixtureIds()) {
-    it(`${id}: replays canned result and matches recorded argv shape`, async () => {
+    it(`${id}: matches fixture argv shape and replays canned wait()`, async () => {
       const raw = await loadAdapterFakeFixture(id);
       const dir = await tempDir();
       await writeFile(join(dir, "prompt.md"), "e2e fixture prompt\n", "utf8");
@@ -169,7 +165,7 @@ describe("adapter fake record/replay from fixtures", () => {
       expect(recorded!.adapter_id).toBe(id);
       expect(recorded!.mode).toBe("fake");
       expect(recorded!.model).toBe(raw.session.model);
-      // Argv shape from fixture (paths expanded to this session dir)
+      expect(recorded!.run_handle).toBe(expected.recorded_start.run_handle);
       expect(recorded!.argv).toEqual(expected.recorded_start.argv);
 
       const result = await agent.wait();

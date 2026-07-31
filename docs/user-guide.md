@@ -75,7 +75,7 @@ lazyorch doctor --no-ci           # force interactive semantics even under CI en
 
 - **Errors** fail the command (e.g. invalid YAML, packing that cannot start work).
 - **Missing adapter binaries** are typically **warnings** so you can still edit config offline.
-- In CI (`--ci` or `CI`/`GITHUB_ACTIONS`), gate `timeout_action` defaults to **fail** (KD-44).
+- In CI (`--ci` or `CI`/`GITHUB_ACTIONS`), gate `timeout_action` **effective default when the field is unset** is **fail** (KD-44). `lazyorch init` writes `timeout_action: none` explicitly; under CI, `doctor` **warns** rather than rewriting the skeleton. Set `gates.timeout_action: fail` in config (or remove the pin so CI default applies) for fail-closed headless runs.
 
 Fix unbound adapters with absolute paths in `config.yml` or `lazyorch adapter register`, then re-run `doctor`.
 
@@ -181,7 +181,7 @@ lazyorch gate reject  <gate_id> [--run id] [--decision action]
 
 Multi-outcome gates **require** `--decision`. Prefer `gate list` after `start` / planning to see payload hints.
 
-Headless CI default for timed-out gates is **fail closed** (`timeout_action: fail`), not auto-approve.
+Headless CI **effective default when unset** is fail-closed (`timeout_action: fail`), not auto-approve. Init skeletons pin `none` until you change config (doctor warns under CI).
 
 ---
 
@@ -231,7 +231,7 @@ Coding adapters support:
 | `fake` | `LAZYORCH_ADAPTER_MODE=fake` | No process; canned `SessionResult`; unbound OK |
 | `record` | `LAZYORCH_ADAPTER_MODE=record` | Real spawn path + capture start records (bound binary required) |
 
-Record/replay **fixtures** for first-class coding adapters live under [`tests/fixtures/adapters/`](../tests/fixtures/adapters/) (`<id>.fake.json`). E2E smoke (planning freeze + implement tick with pure fakes) is under [`tests/e2e/`](../tests/e2e/).
+**Hand-authored golden fixtures** (not live `record` captures) for first-class coding adapters live under [`tests/fixtures/adapters/`](../tests/fixtures/adapters/) (`<id>.fake.json`). Argv shapes match default **test registration** binaries (`/bin/<id>`), not PATH discovery on a real Windows install. Vertical planning→implement smoke (pure fakes, no daemon/CLI) is under [`tests/e2e/`](../tests/e2e/).
 
 ```bash
 # Example: run unit + e2e tests (no LLM keys)

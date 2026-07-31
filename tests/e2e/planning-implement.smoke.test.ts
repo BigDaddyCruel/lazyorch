@@ -1,14 +1,16 @@
 /**
- * E2E smoke: planning freeze → plan_approve → implementing tick loop.
- * Uses injectable fakes only (no live LLM, no real git/forge).
+ * E2E vertical smoke (fakes only): planning freeze → plan_approve → implement ticks.
+ *
+ * Not a full stack E2E (no daemon HTTP, CLI, or live adapters). Complements
+ * package unit tests by stitching planning + implementing in one path.
  */
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_REQUIRED_SECTIONS,
   SCHEMA_VERSION,
   FakeForgeIntegrate,
   FakeIntegrationMutex,
   FakePlanningSession,
-  FakeQaSession,
   FakeReviewerSession,
   FakeScopeLockManager,
   FakeWorktreePort,
@@ -17,67 +19,51 @@ import {
   defaultAdaptersForRouting,
   emptySchedulerRuntime,
   implementingTick,
-  runPlanningPhase,
   type Run,
+  type SchedulerRuntimeState,
   type Task,
+  runPlanningPhase,
 } from "@lazyorch/core";
 
 const FIXED = "2026-07-31T12:00:00.000Z";
-const RUN_ID = "run_e2esmokeaaaaaaaaaaaaaaa";
-const PLAN_ID = "plan_e2esmokeaaaaaaaaaaaaaaa";
+/** Prefixed hex-like ids (isPrefixedId-safe shape). */
+const RUN_ID = "run_e2e00000000000000000001";
+const PLAN_ID = "plan_e2e00000000000000000001";
 
-/** Minimal DESIGN.md with required section headings (freeze validators). */
-function validDesignMd(): string {
-  return [
-    "# Title & metadata",
-    "",
-    "## Overview",
-    "E2E smoke plan freeze + implement.",
-    "",
-    "## Background & motivation",
-    "CI without live LLMs.",
-    "",
-    "## Goals & non-goals",
-    "Goals: freeze + one implement tick path. Non-goals: live adapters.",
-    "",
-    "## Proposed design",
-    "Fake ports only.",
-    "",
-    "## API / interface changes",
-    "None.",
-    "",
-    "## Data model changes",
-    "None.",
-    "",
-    "## Alternatives considered",
-    "1. Live E2E. 2. Record/replay fakes.",
-    "",
-    "## Security & privacy",
-    "No secrets in fixtures.",
-    "",
-    "## Observability",
-    "Freeze hash + task status.",
-    "",
-    "## Rollout / migration",
-    "Test-only.",
-    "",
-    "## Open questions",
-    "None.",
-    "",
-    "## Key Decisions",
-    "| KD | Decision |",
-    "|----|----------|",
-    "| 1  | Fake ports for E2E |",
-    "",
-    "## PR Plan / Task DAG",
-    "See TASK_DAG.json.",
-    "",
-  ].join("\n");
+/**
+ * DESIGN.md whose headings cover {@link DEFAULT_REQUIRED_SECTIONS}
+ * (substring match). Keeps smoke in sync if required sections grow.
+ */
+function designMdFromRequiredSections(): string {
+  const lines: string[] = [];
+  for (const section of DEFAULT_REQUIRED_SECTIONS) {
+    if (section === "Title") {
+      lines.push("# Title & metadata", "", "E2E smoke plan.", "");
+      continue;
+    }
+    if (section === "Key Decisions") {
+      lines.push(
+        `## ${section}`,
+        "",
+        "| KD | Decision |",
+        "|----|----------|",
+        "| 1  | Fake ports for E2E |",
+        "",
+      );
+      continue;
+    }
+    if (section === "PR Plan") {
+      lines.push(`## ${section} / Task DAG`, "", "See TASK_DAG.json.", "");
+      continue;
+    }
+    lines.push(`## ${section}`, "", `E2E smoke: ${section}.`, "");
+  }
+  return lines.join("\n");
 }
 
 function smokeArtifacts() {
   return {
-    design_md: validDesignMd(),
+    design_md: designMdFromRequiredSections(),
     task_dag: {
       tasks: [
         {
@@ -108,19 +94,21 @@ function baseRun(phase: Run["phase"] = "Inception"): Run {
   };
 }
 
-let seq = 0;
+let agentSeq = 0;
+let gateSeq = 0;
 function nextAgentId(): string {
-  seq += 1;
-  return `agt_${String(seq).padStart(24, "a")}`;
+  agentSeq += 1;
+  return `agt_${String(agentSeq).padStart(24, "a")}`;
 }
 function nextGateId(): string {
-  seq += 1;
-  return `gate_${String(seq).padStart(24, "b")}`;
+  gateSeq += 1;
+  return `gate_${String(gateSeq).padStart(24, "b")}`;
 }
 
 describe("E2E smoke: planning freeze + implement tick (fakes)", () => {
   it("freezes plan, approves gate, drives task to done without live LLM", async () => {
-    seq = 0;
+    agentSeq = 0;
+    gateSeq = 0;
     const artifacts = smokeArtifacts();
     const session = new FakePlanningSession({
       writes: [{ artifacts }],
@@ -152,6 +140,9 @@ describe("E2E smoke: planning freeze + implement tick (fakes)", () => {
     expect(planning.reviewer_route?.tier).toBe("large");
     expect(planning.gates).toHaveLength(1);
     expect(planning.gates[0]?.type).toBe("plan_approve");
+    expect(planning.gates[0]?.payload.freeze_hash).toBe(
+      planning.result.freeze_hash,
+    );
 
     // Fake session saw adapter/model routing (not live process)
     expect(session.requests.length).toBeGreaterThanOrEqual(2);
@@ -180,17 +171,14 @@ describe("E2E smoke: planning freeze + implement tick (fakes)", () => {
     const reviewer = new FakeReviewerSession({
       defaultQueue: [{ decision: "approve" }],
     });
-    const qa = new FakeQaSession({
-      defaultQueue: [{ passed: true, summary: "e2e QA pass" }],
-    });
     const worktrees = new FakeWorktreePort();
 
-    let run = {
+    let run: Run = {
       ...approved.run,
       feature_branch: `lazyorch/${RUN_ID}/feature`,
     };
     let tasks: Task[] = planning.result.tasks.map((t) => ({ ...t }));
-    let runtime = emptySchedulerRuntime();
+    let runtime: SchedulerRuntimeState = emptySchedulerRuntime();
     const routing = { adapters: defaultAdaptersForRouting() };
 
     // Tick: promote todo→ready, assign worker, submit for review
@@ -203,7 +191,6 @@ describe("E2E smoke: planning freeze + implement tick (fakes)", () => {
       forge,
       worker,
       reviewer,
-      qa,
       worktrees,
       routing,
       now_ms: 1_000,
@@ -227,7 +214,6 @@ describe("E2E smoke: planning freeze + implement tick (fakes)", () => {
       forge,
       worker,
       reviewer,
-      qa,
       worktrees,
       routing,
       now_ms: 2_000,
@@ -251,7 +237,6 @@ describe("E2E smoke: planning freeze + implement tick (fakes)", () => {
       forge,
       worker,
       reviewer,
-      qa,
       worktrees,
       routing,
       now_ms: 3_000,

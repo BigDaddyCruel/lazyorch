@@ -173,6 +173,7 @@ export {
   CodingAdapterError,
   createCodingAdapter,
   createCodingAdapterForId,
+  extractRunHandle,
   buildCodingArgv,
   expandFlagTemplate,
   resolveCodingBinary,
