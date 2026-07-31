@@ -3,11 +3,11 @@ import type { PrRef, Run } from "../types/run.js";
 import type { Task } from "../types/task.js";
 import {
   canExitImplementing,
-  evaluatingImplementingExit,
   type ExitPredicateParams,
 } from "./exit-predicate.js";
 import {
-  nextPhaseAfterImplementingExit,
+  exitImplementing,
+  RunFsmError,
   transitionRunPhase,
   type TransitionRunOptions,
 } from "./run-fsm.js";
@@ -243,7 +243,7 @@ export function advanceParallel(
     }
   }
 
-  // Successful integrate advances feature tip and invalidates prior QA
+  // Successful integrate advances feature tip; any tip move invalidates prior QA
   if (integrated) {
     const tip = `sim_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     run = {
@@ -251,9 +251,7 @@ export function advanceParallel(
       feature_tip_sha: tip,
       updated_at: new Date().toISOString(),
     };
-    if (run.qa?.passed_at_commit !== tip) {
-      delete run.qa;
-    }
+    delete run.qa;
   }
 
   return { run, tasks };
@@ -261,6 +259,7 @@ export function advanceParallel(
 
 /**
  * If exit predicate holds while in Implementing, move to PrePR or CILoop.
+ * Delegates to {@link exitImplementing}; maps RunFsmError → SimulatorError.
  */
 export function tryExitImplementing(
   state: SimState,
@@ -272,18 +271,17 @@ export function tryExitImplementing(
       `try_exit_implementing requires Implementing, got ${state.run.phase}`,
     );
   }
-  const result = evaluatingImplementingExit(state.run, state.tasks, params);
-  if (!result.ok) {
-    throw new SimulatorError(
-      "exit_not_ready",
-      `Implementing exit predicate not met: ${result.reasons.join("; ")}`,
-    );
+  try {
+    return {
+      ...state,
+      run: exitImplementing(state.run, state.tasks, params),
+    };
+  } catch (e) {
+    if (e instanceof RunFsmError && e.code === "exit_not_ready") {
+      throw new SimulatorError("exit_not_ready", e.message);
+    }
+    throw e;
   }
-  const to = nextPhaseAfterImplementingExit(state.run.pr_ref);
-  return {
-    ...state,
-    run: transitionRunPhase(state.run, to),
-  };
 }
 
 /**
@@ -318,10 +316,12 @@ export function simulateImplementingToExit(
     s = advanceParallel(s, options.max_concurrent);
   }
 
-  if (options.auto_qa !== false) {
-    if (s.run.feature_tip_sha) {
-      s = applySimEvent(s, { type: "set_qa_passed" });
-    }
+  const stillOpen = s.tasks.some(
+    (t) => t.status !== "done" && t.status !== "cancelled",
+  );
+  // Only stamp QA when work is terminal — open tasks must not look QA-green
+  if (!stillOpen && options.auto_qa !== false && s.run.feature_tip_sha) {
+    s = applySimEvent(s, { type: "set_qa_passed" });
   }
 
   if (canExitImplementing(s.run, s.tasks)) {

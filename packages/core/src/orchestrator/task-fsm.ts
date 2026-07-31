@@ -15,7 +15,15 @@ export class TaskFsmError extends Error {
  *
  * Main path: todo → ready → in_progress → review → integrating → done
  * Branches: blocked, failed, cancelled; review→ready on reject;
- * integrating→blocked on integrate_conflict; failed→ready on retry.
+ * integrating→blocked on integrate_conflict; failed→ready on retry;
+ * in_progress→ready for soft requeue (error/timeout/stall/cancel before max_attempts).
+ *
+ * Edges intentionally omitted vs broader guesswork (match design mermaid):
+ * - no in_progress→blocked (scope_lock is ready→blocked before assignment)
+ * - no blocked→failed (blocked exits: ready | integrating | cancelled)
+ *
+ * attempt++: auto only on failed→ready; for in_progress→ready requeue pass
+ * `increment_attempt: true` when the result mapping already counted the attempt.
  */
 const ALLOWED: ReadonlyMap<TaskStatus, ReadonlySet<TaskStatus>> = new Map<
   TaskStatus,
@@ -25,7 +33,7 @@ const ALLOWED: ReadonlyMap<TaskStatus, ReadonlySet<TaskStatus>> = new Map<
   ["ready", new Set<TaskStatus>(["in_progress", "blocked", "cancelled"])],
   [
     "in_progress",
-    new Set<TaskStatus>(["review", "failed", "cancelled", "blocked"]),
+    new Set<TaskStatus>(["review", "ready", "failed", "cancelled"]),
   ],
   ["review", new Set<TaskStatus>(["integrating", "ready", "failed", "cancelled"])],
   [
@@ -34,7 +42,7 @@ const ALLOWED: ReadonlyMap<TaskStatus, ReadonlySet<TaskStatus>> = new Map<
   ],
   [
     "blocked",
-    new Set<TaskStatus>(["ready", "integrating", "cancelled", "failed"]),
+    new Set<TaskStatus>(["ready", "integrating", "cancelled"]),
   ],
   ["failed", new Set<TaskStatus>(["ready", "cancelled"])],
   ["done", new Set<TaskStatus>()],
@@ -74,7 +82,10 @@ export function allowedTaskTransitions(
 export interface TransitionTaskOptions {
   blocked_reason?: BlockedReason;
   integrate_error?: string;
-  /** When moving failed → ready (retry), increment attempt */
+  /**
+   * Increment attempt. Auto-applied on failed→ready; for in_progress→ready
+   * requeue the caller must set this explicitly when counting the attempt.
+   */
   increment_attempt?: boolean;
   assignee?: string;
   worktree_path?: string;

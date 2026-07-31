@@ -93,6 +93,42 @@ describe("Implementing exit predicate", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("fails when feature_tip_sha is missing or empty", () => {
+    const missing = evaluatingImplementingExit(
+      baseRun({ feature_tip_sha: undefined, qa: { passed_at_commit: "x" } }),
+      [t("tsk_a", "done")],
+    );
+    expect(missing.ok).toBe(false);
+    expect(missing.qa_matches).toBe(false);
+    expect(missing.reasons.some((r) => r.includes("feature_tip_sha"))).toBe(
+      true,
+    );
+
+    const empty = evaluatingImplementingExit(
+      baseRun({ feature_tip_sha: "", qa: { passed_at_commit: "" } }),
+      [t("tsk_a", "done")],
+    );
+    expect(empty.ok).toBe(false);
+    expect(empty.reasons.some((r) => r.includes("feature_tip_sha"))).toBe(true);
+  });
+
+  it("passes with empty task list when QA matches tip", () => {
+    const r = evaluatingImplementingExit(baseRun(), []);
+    expect(r.ok).toBe(true);
+    expect(r.open_task_ids).toEqual([]);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it("lists open task ids in reasons", () => {
+    const r = evaluatingImplementingExit(baseRun(), [
+      t("tsk_open", "blocked"),
+      t("tsk_ok", "done"),
+    ]);
+    expect(r.ok).toBe(false);
+    expect(r.open_task_ids).toEqual(["tsk_open"]);
+    expect(r.reasons[0]).toContain("tsk_open");
+  });
+
   it("accepts param overrides for tip / qa / skip", () => {
     const run = baseRun({
       feature_tip_sha: "a",

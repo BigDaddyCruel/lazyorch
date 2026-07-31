@@ -214,4 +214,15 @@ describe("simulator", () => {
     });
     expect(s.tasks[0]!.status).toBe("done");
   });
+
+  it("does not stamp QA when open work remains after max_ticks", () => {
+    const s0 = state(
+      [makeTask("tsk_stuck", { status: "blocked", blocked_reason: "human" })],
+      { feature_tip_sha: "tip0", qa: undefined },
+    );
+    const s = simulateImplementingToExit(s0, { max_ticks: 3 });
+    expect(s.run.phase).toBe("Implementing");
+    expect(s.tasks[0]!.status).toBe("blocked");
+    expect(s.run.qa).toBeUndefined();
+  });
 });

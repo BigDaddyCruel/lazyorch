@@ -6,6 +6,7 @@ export {
   transitionRunPhase,
   hasReadyPr,
   nextPhaseAfterImplementingExit,
+  exitImplementing,
   type TransitionRunOptions,
 } from "./run-fsm.js";
 

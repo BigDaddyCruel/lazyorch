@@ -83,6 +83,27 @@ describe("task FSM", () => {
     expect(t.attempt).toBe(2);
   });
 
+  it("allows in_progress → ready requeue without auto attempt++", () => {
+    expect(canTransitionTaskStatus("in_progress", "ready")).toBe(true);
+    const soft = transitionTaskStatus(task("in_progress", { attempt: 1 }), "ready");
+    expect(soft.status).toBe("ready");
+    expect(soft.attempt).toBe(1);
+    const counted = transitionTaskStatus(
+      task("in_progress", { attempt: 1 }),
+      "ready",
+      { increment_attempt: true },
+    );
+    expect(counted.attempt).toBe(2);
+    // sibling happy-path edges still legal
+    expect(canTransitionTaskStatus("in_progress", "review")).toBe(true);
+    expect(canTransitionTaskStatus("in_progress", "failed")).toBe(true);
+  });
+
+  it("rejects non-design edges (in_progress→blocked, blocked→failed)", () => {
+    expect(canTransitionTaskStatus("in_progress", "blocked")).toBe(false);
+    expect(canTransitionTaskStatus("blocked", "failed")).toBe(false);
+  });
+
   it("rejects illegal edges", () => {
     expect(canTransitionTaskStatus("todo", "done")).toBe(false);
     expect(canTransitionTaskStatus("done", "ready")).toBe(false);

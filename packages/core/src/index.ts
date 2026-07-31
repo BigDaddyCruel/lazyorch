@@ -44,6 +44,7 @@ export {
   transitionRunPhase,
   hasReadyPr,
   nextPhaseAfterImplementingExit,
+  exitImplementing,
   type TransitionRunOptions,
   TaskFsmError,
   OPEN_TASK_STATUSES,

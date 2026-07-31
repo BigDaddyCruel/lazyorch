@@ -1,7 +1,12 @@
+import type { Task } from "../types/task.js";
 import type { PrRef, Run, RunPhase } from "../types/run.js";
+import {
+  evaluatingImplementingExit,
+  type ExitPredicateParams,
+} from "./exit-predicate.js";
 
 export class RunFsmError extends Error {
-  readonly code: "invalid_transition" | "terminal";
+  readonly code: "invalid_transition" | "terminal" | "exit_not_ready";
 
   constructor(code: RunFsmError["code"], message: string) {
     super(message);
@@ -15,11 +20,12 @@ export class RunFsmError extends Error {
  *
  * Terminals: Merged, Cancelled, Failed.
  * Self-edges (Planning → Planning) model internal plan rounds.
+ * PlanConsensus → Planning: plan_approve reject with plan_reject_action=revise.
+ * Implementing → Planning: mid-run replan protocol (after superseding open tasks).
  *
- * Implementing exits:
+ * Implementing exits (table only encodes edges; prefer {@link exitImplementing}):
  * - → PrePR when exit predicate met and no ready PR
  * - → CILoop when exit predicate met and ready PR already exists
- * (predicate evaluation is separate; this table only encodes legal edges)
  */
 const ALLOWED: ReadonlyMap<RunPhase, ReadonlySet<RunPhase>> = new Map<
   RunPhase,
@@ -37,11 +43,17 @@ const ALLOWED: ReadonlyMap<RunPhase, ReadonlySet<RunPhase>> = new Map<
   ],
   [
     "PlanConsensus",
-    new Set<RunPhase>(["Implementing", "Cancelled", "Failed"]),
+    new Set<RunPhase>(["Implementing", "Planning", "Cancelled", "Failed"]),
   ],
   [
     "Implementing",
-    new Set<RunPhase>(["PrePR", "CILoop", "Cancelled", "Failed"]),
+    new Set<RunPhase>([
+      "PrePR",
+      "CILoop",
+      "Planning",
+      "Cancelled",
+      "Failed",
+    ]),
   ],
   ["PrePR", new Set<RunPhase>(["PROpen", "CILoop", "Cancelled", "Failed"])],
   ["PROpen", new Set<RunPhase>(["CILoop", "Cancelled", "Failed"])],
@@ -130,4 +142,35 @@ export function nextPhaseAfterImplementingExit(
   pr: PrRef | undefined,
 ): "PrePR" | "CILoop" {
   return hasReadyPr(pr) ? "CILoop" : "PrePR";
+}
+
+/**
+ * Guarded Implementing exit: requires phase Implementing, exit predicate, then
+ * transitions to PrePR or CILoop via {@link nextPhaseAfterImplementingExit}.
+ * Prefer this over raw `transitionRunPhase(run, "PrePR"|"CILoop")` for schedulers.
+ */
+export function exitImplementing(
+  run: Run,
+  tasks: readonly Task[],
+  params: ExitPredicateParams = {},
+  options: TransitionRunOptions = {},
+): Run {
+  if (run.phase !== "Implementing") {
+    throw new RunFsmError(
+      isTerminalPhase(run.phase) ? "terminal" : "invalid_transition",
+      `exitImplementing requires phase Implementing, got ${run.phase}`,
+    );
+  }
+  const result = evaluatingImplementingExit(run, tasks, params);
+  if (!result.ok) {
+    throw new RunFsmError(
+      "exit_not_ready",
+      `Implementing exit predicate not met: ${result.reasons.join("; ")}`,
+    );
+  }
+  return transitionRunPhase(
+    run,
+    nextPhaseAfterImplementingExit(run.pr_ref),
+    options,
+  );
 }
